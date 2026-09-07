@@ -1,0 +1,14 @@
+cnpgen is now watching {{ .Values.target.label }} and writing its policy into "{{ .Values.target.namespace }}".
+
+Watch it work:
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "cnpgen.fullname" . }}
+
+Get the generated policy files (written to /out in the pod):
+  POD=$(kubectl -n {{ .Release.Namespace }} get pod -l app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n {{ .Release.Namespace }} cp "$POD":/out ./netpol-out
+
+The policy is deployed in safe (non-enforcing) mode. To enforce, edit
+enableDefaultDeny to true in a policy file and apply it.
+
+Stop and clean up:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}

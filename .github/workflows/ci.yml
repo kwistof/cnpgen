@@ -1,0 +1,35 @@
+# Validate the Go code and the Helm chart on every push and pull request.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: helm lint ./charts/cnpgen --set target.label=k=v --set target.namespace=ns
+      - name: chart README is up to date
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work jnorwood/helm-docs:latest \
+            --chart-search-root=charts
+          git diff --exit-code charts/cnpgen/README.md \
+            || { echo "charts/cnpgen/README.md is stale: run helm-docs and commit"; exit 1; }

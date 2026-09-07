@@ -1,0 +1,43 @@
+target:
+  # -- Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required.**
+  label: ""
+  # -- Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required.**
+  namespace: ""
+
+audit:
+  # -- Seconds to watch per round.
+  duration: 120
+  # -- Deploy in preview mode without touching the cluster.
+  dryRun: false
+  # -- Extra raw args passed to `cnpgen audit`, e.g. `["--allow-domain", "*.auth0.com"]`.
+  extraArgs: []
+
+image:
+  # -- Image repository.
+  repository: ghcr.io/kwistof/cnpgen
+  # -- Image tag. Defaults to the chart's `appVersion`.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Namespace where the Cilium agent pods run, cnpgen execs into them.
+ciliumNamespace: kube-system
+
+rbac:
+  # -- Create the ClusterRole/ClusterRoleBinding (manage CiliumNetworkPolicies) and Role/RoleBinding (exec into Cilium pods).
+  create: true
+
+serviceAccount:
+  # -- Create a ServiceAccount for the Job.
+  create: true
+  # -- ServiceAccount name. Empty uses the chart's fullname.
+  name: ""
+
+# -- Pod resource requests/limits.
+resources: {}
+# -- Pod node selector.
+nodeSelector: {}
+# -- Pod tolerations.
+tolerations: []
+# -- Pod affinity.
+affinity: {}

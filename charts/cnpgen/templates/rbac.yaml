@@ -1,0 +1,123 @@
+{{- if .Values.rbac.create }}
+# Manage CiliumNetworkPolicy objects (cluster-wide: the policy may land in any namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-cnp
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-cnp
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cnpgen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "cnpgen.fullname" . }}-cnp
+  apiGroup: rbac.authorization.k8s.io
+---
+# Scale the cnpgen Deployment itself to 0, used only by the pre-delete cleanup
+# hook: it drains the audit loop before deleting its policy, so nothing can
+# re-apply the policy in the gap between that delete and the Deployment
+# actually stopping.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-selfscale
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ include "cnpgen.fullname" . | quote }}]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-selfscale
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cnpgen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "cnpgen.fullname" . }}-selfscale
+  apiGroup: rbac.authorization.k8s.io
+---
+# List pods in the watched namespace, for the upfront "does anything actually
+# match -l/-n" sanity check.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-target-pods
+  namespace: {{ .Values.target.namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-target-pods
+  namespace: {{ .Values.target.namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cnpgen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "cnpgen.fullname" . }}-target-pods
+  apiGroup: rbac.authorization.k8s.io
+---
+# List and exec into the Cilium agent pods (to run hubble / cilium fqdn cache).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-cilium
+  namespace: {{ .Values.ciliumNamespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-cilium
+  namespace: {{ .Values.ciliumNamespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cnpgen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "cnpgen.fullname" . }}-cilium
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

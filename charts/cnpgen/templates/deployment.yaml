@@ -1,0 +1,83 @@
+{{- if not .Values.target.label }}
+{{- fail "target.label is required, e.g. --set target.label=app.kubernetes.io/name=my-app" }}
+{{- end }}
+{{- if not .Values.target.namespace }}
+{{- fail "target.namespace is required, e.g. --set target.namespace=my-namespace" }}
+{{- end }}
+{{- if gt (int .Values.audit.settle) 0 }}
+{{- fail "audit.settle isn't supported in the chart: it runs cnpgen as a long-lived Deployment, and a settling run would exit and be restarted in a loop. Leave audit.settle at 0 here and pull the policy files with `kubectl cp`; use the cnpgen CLI directly if you want a one-shot --settle run." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cnpgen.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # cnpgen is a long-lived watcher, not a request handler: one pod, and don't
+  # spin up a second during rollouts (two would fight over the same policy).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cnpgen.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cnpgen.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "cnpgen.serviceAccountName" . }}
+      containers:
+        - name: cnpgen
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # stdout isn't a TTY under `kubectl logs`, so cnpgen would otherwise
+            # detect no color support; force it since terminals render the ANSI
+            # codes fine regardless of TTY detection at the source.
+            - name: FORCE_COLOR
+              value: "1"
+          args:
+            - audit
+            - -l
+            - {{ .Values.target.label | quote }}
+            - -n
+            - {{ .Values.target.namespace | quote }}
+            - -o
+            - /out
+            - --cilium-namespace
+            - {{ .Values.ciliumNamespace | quote }}
+            - --duration
+            - {{ .Values.audit.duration | quote }}
+            {{- if .Values.audit.dryRun }}
+            - --dry-run
+            {{- end }}
+            {{- range .Values.audit.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          volumeMounts:
+            # The generated policy files land here; pull them with
+            #   kubectl -n {{ .Release.Namespace }} cp <pod>:/out ./netpol-out
+            - name: out
+              mountPath: /out
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: out
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

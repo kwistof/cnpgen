@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-cleanup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+  annotations:
+    # Runs before the Deployment/RBAC are torn down, so cnpgen still has
+    # permission to delete the CiliumNetworkPolicy it deployed while learning.
+    # Without this hook, `helm uninstall` deletes the RBAC binding and sends
+    # SIGTERM to the running pod at roughly the same time, and the pod's own
+    # cleanup can lose that race and leave the policy behind. --scale-down
+    # drains the audit Deployment first so it can't re-apply a policy in the
+    # gap between this hook's delete and the Deployment actually stopping.
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "cnpgen.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "cnpgen.serviceAccountName" . }}
+      containers:
+        - name: cleanup
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - cleanup
+            - -n
+            - {{ .Values.target.namespace | quote }}
+            - --scale-down
+            - {{ include "cnpgen.fullname" . }}
+            - --scale-down-namespace
+            - {{ .Release.Namespace | quote }}
+            - --no-banner
