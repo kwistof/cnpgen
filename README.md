@@ -34,18 +34,12 @@ cnpgen audit -l app.kubernetes.io/name=my-app -n my-namespace
 **On the cluster** with the [Helm chart](charts/cnpgen): it runs as a Deployment that watches in the background:
 
 ```bash
-helm install cnpgen ./charts/cnpgen -n cnpgen --create-namespace \
+helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
   --set target.label=app.kubernetes.io/name=my-app \
   --set target.namespace=my-namespace
-
-kubectl -n cnpgen logs -f deploy/cnpgen  # watch it work
-
-# pull the generated policy files out of the pod:
-POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath='{.items[0].metadata.name}')
-kubectl -n cnpgen cp "$POD":/out ./netpol-out
-
-helm uninstall cnpgen -n cnpgen          # stop & clean up
 ```
+
+See the [chart README](charts/cnpgen/README.md) for pulling the generated policy out and cleaning up.
 
 Either way, cnpgen watches, writes a policy file, and deploys it safely, refining it each round until you stop it (or it settles). When you're happy with the file, flip `enableDefaultDeny` to `true` and apply: that's enforcement.
 
@@ -76,17 +70,15 @@ Build from a saved flows file with no cluster access using `cnpgen generate --fl
 
 ### Reviewing wildcard suggestions
 
-When several sibling domains share a parent (e.g. `tenant1.auth0.com`, `tenant2.auth0.com`), cnpgen can collapse them into one `*.auth0.com` wildcard rule instead of listing each one. By default it doesn't: it leaves them as exact domains and writes a comment above them explaining what it *could* combine them into. Pass `--accept-suggestions` to have it wildcard them right away instead — that comment then lists the domains observed under the wildcard.
+When sibling domains share a parent (e.g. `tenant1.auth0.com`, `tenant2.auth0.com`), cnpgen can collapse them into one `*.auth0.com` rule. By default it leaves them as exact domains and comments what it could combine instead; pass `--accept-suggestions` to wildcard them right away.
 
-Either way, decide later with:
+Decide later, without touching the cluster, with:
 
 ```bash
 cnpgen review -o netpol-out
 ```
 
-It scans every generated policy file and shows every wildcard-eligible group in one checklist: arrow keys (or `j`/`k`) to move, space or enter to check/uncheck a group, esc to cancel. "Select all" and "Done" sit above and below the list as regular rows — move onto one and press enter to use it. Checked groups become a `*.suffix` wildcard; unchecked ones stay exact domains — then it rewrites whichever files changed. No cluster access needed; it only edits the YAML already on disk. Re-running `cnpgen audit`/`generate` regenerates the file from scratch, so a decision only "sticks" if the next round would suggest the same thing again — `review` is meant to be the last pass before you apply the file with enforcement, not a permanent setting.
-
-(Piped input, e.g. in a script, falls back to a numbered list and a single line of comma-separated indices — `1,3`, `all`, or blank to keep the shown defaults.)
+This opens a checklist of every wildcard-eligible group across your policy files. Check the ones you want as `*.suffix` wildcards, leave the rest as exact domains, and it rewrites the changed files. Since `audit`/`generate` regenerate the file from scratch each run, treat `review` as your last pass before applying enforcement, not a permanent setting.
 
 ### Starting from an existing policy
 

@@ -11,11 +11,11 @@ cnpgen never blocks traffic on its own.
 
 ## Install
 
-The only two values you need are the label to watch and the namespace to write
-the policy into:
+The only two values you need are the label to watch and the namespace to
+write the policy into:
 
 ```bash
-helm install cnpgen ./charts/cnpgen -n cnpgen --create-namespace \
+helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
   --set target.label=app.kubernetes.io/name=my-app \
   --set target.namespace=my-namespace
 ```
