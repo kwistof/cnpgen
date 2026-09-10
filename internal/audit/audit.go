@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kwistof/cnpgen/internal/collect"
 	"github.com/kwistof/cnpgen/internal/deploy"
 	"github.com/kwistof/cnpgen/internal/generate"
 	"github.com/kwistof/cnpgen/internal/hubble"
@@ -91,6 +92,23 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 		fmt.Println(ui.Dim(fmt.Sprintf("  %d pod(s) matching %s.", n, pipeline.DescribeTarget(ac.Label, ac.Namespace))))
 	}
 
+	// One persistent, unfiltered `hubble observe --follow` exec per Cilium
+	// pod for the whole run: every round drains this same feed rather than
+	// opening its own exec session. allFlowsWindow and dropFlowsWindow both
+	// subscribe to it; dropFlowsWindow applies the would-be-dropped filter
+	// client-side.
+	followCtx, stopFollow := context.WithCancel(ctx)
+	defer stopFollow()
+	allFlowsWindow := verify.NewWindow(false)
+	dropFlowsWindow := verify.NewWindow(true)
+	follower, err := collect.StartFollow(followCtx, k, ac.Label, func(f *hubble.Flow) {
+		allFlowsWindow.OnFlow(f)
+		dropFlowsWindow.OnFlow(f)
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("starting flow watch: %w", err)
+	}
+
 	flows := append([]*hubble.Flow(nil), initialFlows...)
 	var policies []*generate.Policy
 	settled := false // stopped in a nothing-missing state
@@ -150,7 +168,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			bootstrapDNSAttempted = true
 			deployBootstrapDNS(ctx, k, ac.Namespace, ac.Label)
 			fmt.Printf("  Watching all traffic for %s (no policy yet)...\n", ac.Duration)
-			seen, verr := verify.VerifyWindow(ctx, k, ac.Label, ac.Duration, "")
+			seen, verr := allFlowsWindow.Wait(ctx, ac.Duration)
 			if len(seen) == 0 {
 				fmt.Println(ui.Yellow("  Warning: saw 0 flow(s) this round. If that's unexpected, " +
 					"check the label matches running pods and that they're generating traffic."))
@@ -195,7 +213,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 		lastApply = sig
 
 		fmt.Printf("  Watching %s for anything still missing...\n", ac.Duration)
-		dropFlows, verr := verify.VerifyWindow(ctx, k, ac.Label, ac.Duration, verify.DropCEL)
+		dropFlows, verr := dropFlowsWindow.Wait(ctx, ac.Duration)
 
 		// If the user interrupted mid-window, stop now rather than doing a
 		// final resolve/apply on a cancelled context (which would fail noisily);
@@ -265,6 +283,14 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 	if interrupted {
 		fmt.Println(ui.Dim("\nStopped (Ctrl+C). Finalizing..."))
 		settled = true
+	}
+
+	// Tear down the persistent flow watch before finalizing (stopFollow is
+	// also deferred, but calling it here surfaces any per-pod exec error in
+	// this run's own logs before Run returns).
+	stopFollow()
+	if err := follower.Wait(); err != nil {
+		ui.Warn("flow watch: %v", err)
 	}
 
 	finalize(policies, ac.OutDir)

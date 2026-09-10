@@ -20,7 +20,10 @@ image:
   # -- Image pull policy.
   pullPolicy: IfNotPresent
 
-# -- Namespace where the Cilium agent pods run, cnpgen execs into them.
+# -- Namespace where the Cilium agent pods run, cnpgen execs into them. Since
+# this chart runs `cnpgen audit` as a long-lived Deployment, expect one
+# long-lived `hubble observe --follow` exec session per Cilium agent pod for
+# the lifetime of this release.
 ciliumNamespace: kube-system
 
 rbac:

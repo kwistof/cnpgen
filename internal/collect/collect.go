@@ -12,6 +12,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -245,25 +247,35 @@ func CollectLast(ctx context.Context, k *kube.Client, label string, last int, ce
 	return allFlows, nil
 }
 
-// StreamFollow streams live flows from every Cilium pod, calling onFlow for
-// each. It blocks until ctx is cancelled. `cel` may be "" for no filter.
-func StreamFollow(ctx context.Context, k *kube.Client, label, cel string, onFlow func(*hubble.Flow)) error {
+// Follower keeps exactly one unfiltered `hubble observe --follow` exec alive
+// per Cilium pod for as long as ctx lives. Every parsed flow is pushed to
+// onFlow as it arrives; callers that need a bounded window (e.g. one audit
+// round) filter/collect from onFlow themselves rather than starting a new
+// exec per window.
+type Follower struct {
+	wg   sync.WaitGroup
+	errs []error
+	mu   sync.Mutex
+}
+
+// StartFollow starts the persistent per-pod streams and returns immediately;
+// call Wait to block until ctx is cancelled and every stream has torn down.
+func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(*hubble.Flow)) (*Follower, error) {
 	pods, err := k.CiliumPods(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(pods) == 0 {
 		ui.Warn("No cilium pods found.")
-		return nil
+		return &Follower{}, nil
 	}
 
-	argv := observeCmd(label, 0, true, cel)
-
-	var wg sync.WaitGroup
+	argv := observeCmd(label, 0, true, "")
+	f := &Follower{}
 	for _, pod := range pods {
-		wg.Add(1)
+		f.wg.Add(1)
 		go func(pod kube.Pod) {
-			defer wg.Done()
+			defer f.wg.Done()
 			pr, pw := io.Pipe()
 			done := make(chan struct{})
 			go func() {
@@ -282,15 +294,27 @@ func StreamFollow(ctx context.Context, k *kube.Client, label, cel string, onFlow
 				}
 				close(done)
 			}()
-			// Cancelling ctx tears down the exec stream, which closes pw and
-			// unblocks the scanner above.
-			_ = k.ExecStream(ctx, pod.Name, argv, pw)
+			err := k.ExecStream(ctx, pod.Name, argv, pw)
 			pw.Close()
 			<-done
+			if err != nil {
+				f.mu.Lock()
+				f.errs = append(f.errs, fmt.Errorf("%s: %w", pod.Name, err))
+				f.mu.Unlock()
+			}
 		}(pod)
 	}
-	wg.Wait()
-	return nil
+	return f, nil
+}
+
+// Wait blocks until every per-pod stream has torn down (i.e. until the ctx
+// passed to StartFollow is cancelled) and returns any exec errors joined
+// together.
+func (f *Follower) Wait() error {
+	f.wg.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return errors.Join(f.errs...)
 }
 
 func lastLine(s string) string {

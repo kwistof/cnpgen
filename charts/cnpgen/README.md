@@ -59,7 +59,7 @@ keep.
 | audit.dryRun | bool | `false` | Deploy in preview mode without touching the cluster. |
 | audit.duration | int | `120` | Seconds to watch per round. |
 | audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`, e.g. `["--allow-domain", "*.auth0.com"]`. |
-| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. |
+| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |
 | image.tag | string | `""` | Image tag. Defaults to the chart's `appVersion`. |

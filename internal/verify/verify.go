@@ -3,8 +3,9 @@
 //
 // With enableDefaultDeny:false policies deployed, any flow still reporting
 // policy_match_type == 4 is traffic the policy does NOT yet allow: a missing
-// rule. VerifyWindow returns those flows so the audit loop can feed them back
-// through ExtractConnections.
+// rule. Window collects those flows (from a flow feed the caller already has
+// running, see collect.Follower) so the audit loop can feed them back through
+// ExtractConnections.
 package verify
 
 import (
@@ -14,48 +15,79 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kwistof/cnpgen/internal/collect"
 	"github.com/kwistof/cnpgen/internal/hubble"
-	"github.com/kwistof/cnpgen/internal/kube"
 	"github.com/kwistof/cnpgen/internal/labels"
 	"github.com/kwistof/cnpgen/internal/ui"
 )
 
-// DropCEL selects flows Cilium would drop under an enforcing policy.
-const DropCEL = "_flow.policy_match_type == uint(4)"
+// dropped reports whether Cilium would drop this flow under an enforcing
+// policy.
+func dropped(f *hubble.Flow) bool {
+	return f.PolicyMatchType == 4
+}
 
-// VerifyWindow streams flows for `duration`, returning the collected flows.
-// `cel` defaults to the would-be-dropped filter; pass "" to stream every flow
-// (used when there's no deployed policy yet). It stops early if the parent ctx
-// is cancelled (e.g. Ctrl+C), returning ctx.Err() so the caller can stop
-// looping.
-func VerifyWindow(ctx context.Context, k *kube.Client, label string, duration time.Duration, cel string) ([]*hubble.Flow, error) {
-	windowCtx, cancel := context.WithTimeout(ctx, duration)
-	defer cancel()
+// Window collects flows from an already-running flow feed (see
+// collect.StartFollow) for `duration`, optionally keeping only would-be-dropped
+// flows.
+type Window struct {
+	mu        sync.Mutex
+	collected []*hubble.Flow
+	dropOnly  bool
+}
 
-	var (
-		mu        sync.Mutex
-		collected []*hubble.Flow
-	)
-	onFlow := func(f *hubble.Flow) {
-		mu.Lock()
-		collected = append(collected, f)
-		mu.Unlock()
+// NewWindow returns a Window ready to receive flows via OnFlow. When dropOnly
+// is true, only would-be-dropped flows (policy_match_type == 4) are kept;
+// otherwise every flow is kept.
+func NewWindow(dropOnly bool) *Window {
+	return &Window{dropOnly: dropOnly}
+}
+
+// OnFlow is the callback to pass to the shared flow feed (collect.Follower).
+func (w *Window) OnFlow(f *hubble.Flow) {
+	if w.dropOnly && !dropped(f) {
+		return
+	}
+	w.mu.Lock()
+	w.collected = append(w.collected, f)
+	w.mu.Unlock()
+}
+
+// Reset clears collected flows so the same Window can be reused for the next
+// round without a new subscription.
+func (w *Window) Reset() {
+	w.mu.Lock()
+	w.collected = nil
+	w.mu.Unlock()
+}
+
+// Snapshot returns the flows collected so far.
+func (w *Window) Snapshot() []*hubble.Flow {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]*hubble.Flow(nil), w.collected...)
+}
+
+// Wait blocks for `duration` or until ctx is cancelled, then returns the
+// flows collected during that time (via Reset beforehand to scope it to just
+// this call). It stops early if ctx is cancelled (e.g. Ctrl+C), returning
+// ctx.Err() so the caller can stop looping.
+func (w *Window) Wait(ctx context.Context, duration time.Duration) ([]*hubble.Flow, error) {
+	w.Reset()
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return w.Snapshot(), ctx.Err()
 	}
 
-	err := collect.StreamFollow(windowCtx, k, label, cel, onFlow)
-
-	kind := "would-be-dropped"
-	if cel == "" {
-		kind = "observed"
+	collected := w.Snapshot()
+	kind := "observed"
+	if w.dropOnly {
+		kind = "would-be-dropped"
 	}
-	ui.Log("VerifyWindow: %d %s flows in %s", len(collected), kind, duration)
-
-	if ctx.Err() != nil {
-		// The parent (not just the window timeout) was cancelled, so surface it.
-		return collected, ctx.Err()
-	}
-	return collected, err
+	ui.Log("Window: %d %s flows in %s", len(collected), kind, duration)
+	return collected, nil
 }
 
 // DropKey identifies a distinct would-be-dropped connection.
