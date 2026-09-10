@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -222,8 +224,30 @@ func (c *Client) Exec(ctx context.Context, pod string, argv []string) (stdout, s
 
 // ExecStream runs argv in a Cilium pod, writing stdout to w as it arrives.
 // Cancel ctx to stop it. Used for `hubble observe --follow`.
+//
+// Cancelling ctx closes cnpgen's side of the exec connection, but that alone
+// does not guarantee the process inside the container exits: with no TTY
+// allocated (cnpgen never allocates one), there's no pty to hang up on, so
+// whether the remote process notices its stdout pipe has gone away is up to
+// that process. `hubble observe --follow` does not. Callers that need the
+// remote process gone (not just disconnected from) must call KillMatching
+// after ExecStream returns.
 func (c *Client) ExecStream(ctx context.Context, pod string, argv []string, w io.Writer) error {
 	return c.stream(ctx, pod, argv, nil, w, io.Discard)
+}
+
+// KillMatching best-effort kills any process in pod whose command line
+// exactly matches argv, via `pkill -f`. Used to clean up an exec'd process
+// that ExecStream's context cancellation alone won't terminate. It uses its
+// own short-lived context so it still runs after the caller's ctx (the one
+// that governed the now-stopped ExecStream) is already cancelled; failures
+// are swallowed since this is opportunistic cleanup, not load-bearing for
+// correctness.
+func (c *Client) KillMatching(pod string, argv []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pattern := "^" + regexp.QuoteMeta(strings.Join(argv, " ")) + "$"
+	_, _, _ = c.Exec(ctx, pod, []string{"pkill", "-f", pattern})
 }
 
 func (c *Client) stream(ctx context.Context, pod string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {

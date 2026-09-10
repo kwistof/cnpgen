@@ -297,6 +297,13 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 			err := k.ExecStream(ctx, pod.Name, argv, pw)
 			pw.Close()
 			<-done
+			// ExecStream's context cancellation closes cnpgen's side of the
+			// connection but does not, by itself, terminate the exec'd
+			// process on the agent: with no TTY there's no pty hangup, and
+			// `hubble observe --follow` doesn't exit on its own when its
+			// stdout pipe goes away. Explicitly kill it so it doesn't run
+			// forever as an orphan.
+			k.KillMatching(pod.Name, argv)
 			if err != nil {
 				f.mu.Lock()
 				f.errs = append(f.errs, fmt.Errorf("%s: %w", pod.Name, err))
