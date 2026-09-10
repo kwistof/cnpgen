@@ -1,8 +1,12 @@
-# Build and publish the cnpgen image to GitHub Container Registry on every push
-# to main and on version tags, so `ghcr.io/kwistof/cnpgen:latest` stays current.
-# Also pushes charts/cnpgen as an OCI artifact so it can be installed with
+# Build and publish the cnpgen image to GitHub Container Registry on version
+# tags only, tagged `latest` and with the tag's semver, so `:latest` only ever
+# moves on a deliberate release rather than on every merge to main.
+# Also pushes charts/cnpgen as an OCI artifact on every push to main so it can
+# be installed with
 # `helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen --version <chart-version>`
-# without cloning the repo.
+# without cloning the repo; this is safe on every push because it always
+# publishes whatever version is currently in Chart.yaml, so it only actually
+# changes anything when that version is bumped.
 name: release
 
 on:
@@ -12,6 +16,7 @@ on:
 
 jobs:
   image:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
