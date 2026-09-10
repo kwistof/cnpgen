@@ -2,8 +2,8 @@ apiVersion: v2
 name: cnpgen
 description: Run cnpgen in your cluster to generate a Cilium network policy from observed traffic.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 home: https://github.com/kwistof/cnpgen
 sources:
   - https://github.com/kwistof/cnpgen
