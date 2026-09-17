@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/kwistof/cnpgen/internal/collect"
@@ -101,12 +102,23 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 	// opening its own exec session. allFlowsWindow and dropFlowsWindow both
 	// subscribe to it; dropFlowsWindow applies the would-be-dropped filter
 	// client-side.
+	//
+	// allFlowsWindow is only ever drained (via Wait, in the "no policy yet"
+	// bootstrap branch below) before the first policy exists. Once one does,
+	// nothing calls Wait/Reset on it again for the rest of the run, so
+	// needsAllFlows gates the callback to stop feeding it at that point —
+	// otherwise it would collect every flow for the run's entire remaining
+	// (unbounded) lifetime with nothing ever draining it, growing forever.
+	var needsAllFlows atomic.Bool
+	needsAllFlows.Store(true)
 	followCtx, stopFollow := context.WithCancel(ctx)
 	defer stopFollow()
 	allFlowsWindow := verify.NewWindow(false)
 	dropFlowsWindow := verify.NewWindow(true)
 	follower, err := collect.StartFollow(followCtx, k, ac.Label, func(f *hubble.Flow) {
-		allFlowsWindow.OnFlow(f)
+		if needsAllFlows.Load() {
+			allFlowsWindow.OnFlow(f)
+		}
 		dropFlowsWindow.OnFlow(f)
 	})
 	if err != nil {
@@ -197,6 +209,11 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			}
 			continue
 		}
+
+		// A real policy exists from here on: allFlowsWindow's bootstrap job is
+		// done, and nothing will drain it again this run, so stop feeding it
+		// (see needsAllFlows's comment above).
+		needsAllFlows.Store(false)
 
 		if bootstrapDNSAttempted {
 			fmt.Println(ui.Dim("  Removing temporary DNS visibility (app policy now covers it):"))
