@@ -134,6 +134,16 @@ func FqdnCacheFromDump(path string) (map[string]map[string]struct{}, error) {
 // FqdnFromFlows extracts fqdn -> set(ips) from flow destination_names, if any.
 func FqdnFromFlows(flows []*hubble.Flow) map[string]map[string]struct{} {
 	fqdnIPs := map[string]map[string]struct{}{}
+	MergeFqdnFromFlows(fqdnIPs, flows)
+	return fqdnIPs
+}
+
+// MergeFqdnFromFlows folds fqdn -> set(ips) pairs from flow destination_names
+// into dst. Lets a caller accumulate this mapping across many small flow
+// batches (e.g. one per audit round) without keeping the raw flows around:
+// dst's size is bounded by the number of distinct FQDN/IP pairs ever seen,
+// not by traffic volume.
+func MergeFqdnFromFlows(dst map[string]map[string]struct{}, flows []*hubble.Flow) {
 	for _, flow := range flows {
 		if flow == nil {
 			continue
@@ -147,10 +157,9 @@ func FqdnFromFlows(flows []*hubble.Flow) map[string]map[string]struct{} {
 			if n == "" {
 				continue
 			}
-			addIPs(fqdnIPs, n, []string{ip})
+			addIPs(dst, n, []string{ip})
 		}
 	}
-	return fqdnIPs
 }
 
 // BuildIndex merges fqdn->ips sources (highest confidence first) into a

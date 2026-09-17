@@ -38,7 +38,11 @@ type Config struct {
 	Seed      *generate.Seed // from --seed-policy; merged into every round as a floor
 }
 
-func resolveIndex(ctx context.Context, k *kube.Client, cfg settings.Settings, flows []*hubble.Flow, fqdnDump string) *model.ResolveIndex {
+// resolveIndex builds the resolve index. fqdnIPs is the audit loop's
+// persistent, round-over-round accumulation of fqdn->ips pairs seen in flow
+// L7 data (see collect.MergeConnections's sibling resolve.MergeFqdnFromFlows)
+// rather than the raw flows themselves.
+func resolveIndex(ctx context.Context, k *kube.Client, cfg settings.Settings, fqdnIPs map[string]map[string]struct{}, fqdnDump string) *model.ResolveIndex {
 	var sources []resolve.Source
 	if fqdnDump != "" {
 		if m, err := resolve.FqdnCacheFromDump(fqdnDump); err == nil {
@@ -51,7 +55,7 @@ func resolveIndex(ctx context.Context, k *kube.Client, cfg settings.Settings, fl
 	} else {
 		ui.Warn("fetching live FQDN cache: %v", err)
 	}
-	sources = append(sources, resolve.Source{Name: "flow-l7", Map: resolve.FqdnFromFlows(flows)})
+	sources = append(sources, resolve.Source{Name: "flow-l7", Map: fqdnIPs})
 	return resolve.BuildIndex(sources, cfg.KnownIPs)
 }
 
@@ -109,7 +113,17 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 		return nil, false, fmt.Errorf("starting flow watch: %w", err)
 	}
 
-	flows := append([]*hubble.Flow(nil), initialFlows...)
+	// graph and fqdnIPs are the run's persistent state, accumulated round over
+	// round by folding in each round's flow batch (collect.MergeConnections,
+	// resolve.MergeFqdnFromFlows) rather than keeping every flow ever seen: an
+	// audit run has no natural end (the Helm chart always sets Settle=0), so
+	// retaining raw flows for the run's whole lifetime grows without bound and
+	// eventually OOMs. Both accumulators are instead bounded by the number of
+	// distinct connections/FQDNs ever observed, not by traffic volume.
+	graph := model.NewConnGraph()
+	fqdnIPs := map[string]map[string]struct{}{}
+	collect.MergeConnections(graph, initialFlows, ac.Label, ac.Namespace)
+	resolve.MergeFqdnFromFlows(fqdnIPs, initialFlows)
 	var policies []*generate.Policy
 	settled := false // stopped in a nothing-missing state
 	// bootstrapDNSAttempted tracks whether a deploy of the standalone DNS
@@ -135,8 +149,8 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 
 		fmt.Println(ui.Cyan(fmt.Sprintf("\n== Round %d ==", rnd)))
 
-		index := resolveIndex(ctx, k, cfg, flows, ac.FqdnDump)
-		policies = pipeline.GeneratePolicies(flows, ac.Label, ac.Namespace, index, cfg, ac.Accept, true, false, ac.Seed)
+		index := resolveIndex(ctx, k, cfg, fqdnIPs, ac.FqdnDump)
+		policies = pipeline.GeneratePoliciesFromGraph(graph, ac.Namespace, index, cfg, ac.Accept, true, false, ac.Seed)
 		paths, err := pipeline.WritePolicies(policies, ac.OutDir)
 		if err != nil {
 			return policies, false, err
@@ -175,7 +189,8 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			} else {
 				fmt.Printf("  Saw %d flow(s).\n", len(seen))
 			}
-			flows = append(flows, seen...)
+			collect.MergeConnections(graph, seen, ac.Label, ac.Namespace)
+			resolve.MergeFqdnFromFlows(fqdnIPs, seen)
 			if errors.Is(verr, context.Canceled) {
 				interrupted = true
 				break
@@ -232,8 +247,8 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			// The DNS-visibility rule just spent `duration` letting the FQDN
 			// cache populate. Re-resolve and redeploy once more so a round that
 			// stabilizes early still ends up with toFQDNs instead of raw IPs.
-			index = resolveIndex(ctx, k, cfg, flows, ac.FqdnDump)
-			policies = pipeline.GeneratePolicies(flows, ac.Label, ac.Namespace, index, cfg, ac.Accept, true, false, ac.Seed)
+			index = resolveIndex(ctx, k, cfg, fqdnIPs, ac.FqdnDump)
+			policies = pipeline.GeneratePoliciesFromGraph(graph, ac.Namespace, index, cfg, ac.Accept, true, false, ac.Seed)
 			if _, err := pipeline.WritePolicies(policies, ac.OutDir); err != nil {
 				return policies, false, err
 			}
@@ -277,7 +292,8 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 		// next round generates the missing rules.
 		stableStreak = 0
 		fmt.Println(ui.Yellow("  Missing traffic added, continuing."))
-		flows = append(flows, dropFlows...)
+		collect.MergeConnections(graph, dropFlows, ac.Label, ac.Namespace)
+		resolve.MergeFqdnFromFlows(fqdnIPs, dropFlows)
 	}
 
 	if interrupted {

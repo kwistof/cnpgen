@@ -31,6 +31,15 @@ func GeneratePolicies(flows []*hubble.Flow, label, namespace string, index *mode
 	cfg settings.Settings, accept, tempDNS, prune bool, seed *generate.Seed) []*generate.Policy {
 
 	graph := collect.ExtractConnections(flows, label, namespace)
+	return GeneratePoliciesFromGraph(graph, namespace, index, cfg, accept, tempDNS, prune, seed)
+}
+
+// GeneratePoliciesFromGraph is GeneratePolicies for a caller that already
+// maintains its own ConnGraph (e.g. the audit loop, which merges each
+// round's flows into a persistent graph rather than keeping raw flows around
+// for the life of the run — see collect.MergeConnections).
+func GeneratePoliciesFromGraph(graph *model.ConnGraph, namespace string, index *model.ResolveIndex,
+	cfg settings.Settings, accept, tempDNS, prune bool, seed *generate.Seed) []*generate.Policy {
 
 	// Sort endpoints by (App, Namespace) for deterministic output.
 	eps := make([]model.Endpoint, 0, graph.Len())

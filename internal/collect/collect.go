@@ -67,7 +67,16 @@ func isOurs(ep hubble.Endpoint, label, namespace string) bool {
 // same namespace the generated policy will be deployed into.
 func ExtractConnections(flows []*hubble.Flow, label, namespace string) *model.ConnGraph {
 	graph := model.NewConnGraph()
+	MergeConnections(graph, flows, label, namespace)
+	return graph
+}
 
+// MergeConnections folds flows into an existing ConnGraph. Lets a caller
+// accumulate connections across many small flow batches (e.g. one per audit
+// round) without keeping the raw flows around: graph's size is bounded by
+// the number of distinct (src,dst,port,proto) tuples ever seen, not by
+// traffic volume.
+func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, namespace string) {
 	for _, flow := range flows {
 		if flow == nil || flow.IsReply {
 			continue
@@ -117,8 +126,6 @@ func ExtractConnections(flows []*hubble.Flow, label, namespace string) *model.Co
 			bucket.IngressApps[model.AppConn{Peer: srcKey, Port: port, Proto: proto}]++
 		}
 	}
-
-	return graph
 }
 
 // LoadFlowsFile loads flows from a file, accepting either a JSON array or
