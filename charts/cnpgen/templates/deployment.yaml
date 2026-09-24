@@ -7,6 +7,9 @@
 {{- if gt (int .Values.audit.settle) 0 }}
 {{- fail "audit.settle isn't supported in the chart: it runs cnpgen as a long-lived Deployment, and a settling run would exit and be restarted in a loop. Leave audit.settle at 0 here and pull the policy files with `kubectl cp`; use the cnpgen CLI directly if you want a one-shot --settle run." }}
 {{- end }}
+{{- if not (has .Values.audit.mode (list "audit" "verify")) }}
+{{- fail (printf "audit.mode must be \"audit\" or \"verify\", got %q" .Values.audit.mode) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,18 +43,20 @@ spec:
             - name: FORCE_COLOR
               value: "1"
           args:
-            - audit
+            - {{ .Values.audit.mode }}
             - -l
             - {{ .Values.target.label | quote }}
             - -n
             - {{ .Values.target.namespace | quote }}
+            {{- if eq .Values.audit.mode "audit" }}
             - -o
             - /out
+            {{- end }}
             - --cilium-namespace
             - {{ .Values.ciliumNamespace | quote }}
             - --duration
             - {{ .Values.audit.duration | quote }}
-            {{- if .Values.audit.dryRun }}
+            {{- if and (eq .Values.audit.mode "audit") .Values.audit.dryRun }}
             - --dry-run
             {{- end }}
             {{- range .Values.audit.extraArgs }}

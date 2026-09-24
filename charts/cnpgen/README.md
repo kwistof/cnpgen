@@ -56,9 +56,10 @@ keep.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Pod affinity. |
-| audit.dryRun | bool | `false` | Deploy in preview mode without touching the cluster. |
+| audit.dryRun | bool | `false` | Deploy in preview mode without touching the cluster. Ignored in "verify" mode, which never touches the cluster regardless. |
 | audit.duration | int | `120` | Seconds to watch per round. |
-| audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`, e.g. `["--allow-domain", "*.auth0.com"]`. |
+| audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`. |
+| audit.mode | string | `"audit"` | "audit" (default) generates and deploys a working policy from observed traffic. "verify" is read-only: it watches traffic against whatever CiliumNetworkPolicy is already deployed for target.label/target.namespace (yours or hand-written) and reports what it doesn't allow, without generating, deploying, or deleting anything. In "verify" mode, dryRun and extraArgs still apply but generate/deploy-only args (e.g. --allow-domain) are meaningless since nothing is generated. |
 | ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |

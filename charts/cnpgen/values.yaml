@@ -5,11 +5,19 @@ target:
   namespace: ""
 
 audit:
+  # -- "audit" (default) generates and deploys a working policy from observed
+  # traffic. "verify" is read-only: it watches traffic against whatever
+  # CiliumNetworkPolicy is already deployed for target.label/target.namespace
+  # (yours or hand-written) and reports what it doesn't allow, without
+  # generating, deploying, or deleting anything. In "verify" mode, dryRun and
+  # extraArgs still apply but generate/deploy-only args (e.g. --allow-domain)
+  # are meaningless since nothing is generated.
+  mode: audit
   # -- Seconds to watch per round.
   duration: 120
-  # -- Deploy in preview mode without touching the cluster.
+  # -- Deploy in preview mode without touching the cluster. Ignored in "verify" mode, which never touches the cluster regardless.
   dryRun: false
-  # -- Extra raw args passed to `cnpgen audit`, e.g. `["--allow-domain", "*.auth0.com"]`.
+  # -- Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`.
   extraArgs: []
 
 image:

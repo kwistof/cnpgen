@@ -1,3 +1,14 @@
+{{- if eq .Values.audit.mode "verify" }}
+cnpgen is now watching {{ .Values.target.label }} in "{{ .Values.target.namespace }}", read-only: it
+reports what the CiliumNetworkPolicy already deployed there doesn't allow,
+without generating, deploying, or deleting anything.
+
+Watch it work:
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "cnpgen.fullname" . }}
+
+Stop:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- else }}
 cnpgen is now watching {{ .Values.target.label }} and writing its policy into "{{ .Values.target.namespace }}".
 
 Watch it work:
@@ -12,3 +23,4 @@ enableDefaultDeny to true in a policy file and apply it.
 
 Stop and clean up:
   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- end }}

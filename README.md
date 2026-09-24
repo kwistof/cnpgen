@@ -90,6 +90,18 @@ cnpgen audit -l app.kubernetes.io/name=my-app -n my-namespace --seed-policy old-
 
 Every domain and CIDR already in that file is kept in the generated policy from round one, whether or not this run's traffic actually confirms it — a floor, not a starting guess that gets discarded. Real traffic still extends the policy as usual. The seed file's `endpointSelector` must match `-l`, or cnpgen refuses to use it (protects against seeding the wrong app's rules by mistake).
 
+### Verifying an existing policy, read-only
+
+Already have a `CiliumNetworkPolicy` deployed — yours or hand-written — and just want to check it's not about to drop anything before you flip on enforcement? Use `cnpgen verify` instead of `audit`:
+
+```bash
+cnpgen verify -l app.kubernetes.io/name=my-app -n my-namespace
+```
+
+Same watch loop as `audit`, but read-only: it never generates, deploys, or deletes anything. Each round it reports which flows the *currently deployed* policy doesn't allow (`policy_match_type == 4`, judged by Cilium itself against whatever's actually live — not by cnpgen), plus a suggested `toFQDNs`/`toEndpoints`/`toCIDR` snippet for each one to paste into your policy by hand. Runs until Ctrl+C, or use `--settle N` to auto-stop after N clean rounds in a row.
+
+This is aimed at a policy you're about to enforce, or already enforcing — for cnpgen's own non-enforcing learning policies, use `audit`'s own missing-traffic report instead, since a non-enforcing policy never actually drops anything.
+
 ---
 
 ## Safety

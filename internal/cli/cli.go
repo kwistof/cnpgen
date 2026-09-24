@@ -33,6 +33,7 @@ import (
 	"github.com/kwistof/cnpgen/internal/review"
 	"github.com/kwistof/cnpgen/internal/settings"
 	"github.com/kwistof/cnpgen/internal/ui"
+	"github.com/kwistof/cnpgen/internal/verifycmd"
 )
 
 // stringList is a repeatable string flag.
@@ -132,6 +133,8 @@ func Main(argv []string) int {
 	switch argv[0] {
 	case "audit":
 		return cmdAudit(argv[1:])
+	case "verify":
+		return cmdVerify(argv[1:])
 	case "generate":
 		return cmdGenerate(argv[1:])
 	case "cleanup":
@@ -155,6 +158,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, banner)
 	fmt.Fprintln(os.Stderr, `Usage:
   cnpgen audit    -l <label> -n <namespace> [options]    watch live traffic and build a working policy
+  cnpgen verify   -l <label> -n <namespace> [options]    read-only: report what the deployed policy doesn't allow
   cnpgen generate -l <label> -n <namespace> --flows <f>  build policy files offline from a saved flows file
   cnpgen cleanup  -n <namespace>                         delete cnpgen-managed policies from a namespace
   cnpgen review   [-o <dir>]                             interactively accept/decline wildcard suggestions
@@ -167,7 +171,11 @@ Quick start:
   netpol-out/, deploys it in safe (non-enforcing) mode, and repeats until
   nothing is missing. It never turns enforcement on: that stays your call.
 
-Run "cnpgen audit -h" or "cnpgen generate -h" for the full option list.`)
+  Already have a policy deployed (yours or hand-written) and just want to
+  check it's not about to drop anything? Use "cnpgen verify" instead: same
+  watch loop, but read-only - it never generates, deploys, or deletes.
+
+Run "cnpgen audit -h", "cnpgen verify -h", or "cnpgen generate -h" for the full option list.`)
 }
 
 // printGrouped renders a subcommand's flags in labelled groups, so the help is
@@ -268,6 +276,73 @@ func cmdAudit(argv []string) int {
 		Seed:      seed,
 	}, initial)
 	if err != nil {
+		return fail("%v", err)
+	}
+	return 0
+}
+
+func cmdVerify(argv []string) int {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	var g globalFlags
+	fs.StringVar(&g.label, "l", "", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
+	fs.StringVar(&g.label, "label", "", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
+	fs.StringVar(&g.namespace, "n", "default", "namespace pods run in")
+	fs.StringVar(&g.namespace, "namespace", "default", "namespace pods run in")
+	fs.StringVar(&g.context, "context", "", "kube context to use (default: current context)")
+	fs.StringVar(&g.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: in-cluster, then ~/.kube/config)")
+	fs.StringVar(&g.ciliumNamespace, "cilium-namespace", "kube-system", "namespace of the Cilium agent pods")
+	fs.StringVar(&g.ciliumSelector, "cilium-selector", "k8s-app=cilium", "label selector for the Cilium agent pods")
+	fs.Var(&g.nodes, "nodes", "restrict traffic collection to these node names (repeatable)")
+	fs.BoolVar(&g.debug, "debug", false, "verbose debug logging to stderr")
+	fs.BoolVar(&g.noBanner, "no-banner", false, "suppress the banner")
+
+	var fqdnCache string
+	var settle, duration int
+	fs.StringVar(&fqdnCache, "fqdn-cache", "", "resolve suggestion destinations from this saved *-fqdn dump instead of the live cache")
+	fs.IntVar(&settle, "settle", 0, "stop once N rounds in a row see nothing missing (0 = never auto-stop)")
+	fs.IntVar(&duration, "duration", 120, "how many seconds to watch per round")
+
+	fs.Usage = func() {
+		printGrouped("verify",
+			"Watch live traffic for the selected pods and report what the CiliumNetworkPolicy\n"+
+				"already deployed for them (yours or hand-written - cnpgen doesn't touch it) does\n"+
+				"NOT allow. Read-only: never generates, deploys, or deletes anything. Runs until\n"+
+				"you stop it (Ctrl+C) or it settles.",
+			"  cnpgen verify -l app.kubernetes.io/name=my-app -n my-namespace",
+			fs, [][2]any{
+				{"Target", []string{"l", "n"}},
+				{"Run control", []string{"duration", "settle"}},
+				{"Tuning", []string{"fqdn-cache"}},
+				{"Cluster", []string{"context", "kubeconfig", "cilium-namespace", "cilium-selector", "nodes"}},
+				{"Misc", []string{"debug", "no-banner"}},
+			})
+	}
+	if err := fs.Parse(argv); err != nil {
+		return 2
+	}
+	ui.Debug = g.debug
+	showBanner(&g)
+
+	if code, ok := requireTarget(&g); !ok {
+		return code
+	}
+
+	k, err := g.newKube()
+	if err != nil {
+		return fail("%v", err)
+	}
+
+	// Ctrl+C cancels the context; the verify loop stops cleanly.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := verifycmd.Run(ctx, k, verifycmd.Config{
+		Label:     g.label,
+		Namespace: g.namespace,
+		Settle:    settle,
+		Duration:  time.Duration(duration) * time.Second,
+		FqdnDump:  fqdnCache,
+	}); err != nil {
 		return fail("%v", err)
 	}
 	return 0
