@@ -38,6 +38,10 @@ type Flow struct {
 	IP               IPBlock  `json:"IP"`
 	DestinationNames []string `json:"destination_names"`
 	PolicyMatchType  uint32   `json:"policy_match_type"`
+	Time             string   `json:"time"`
+	Verdict          string   `json:"verdict"`           // FORWARDED | DROPPED | ...
+	DropReasonDesc   string   `json:"drop_reason_desc"`  // e.g. POLICY_DENIED
+	TrafficDirection string   `json:"traffic_direction"` // INGRESS | EGRESS
 }
 
 // wrapper matches the `{"flow": {...}}` envelope Hubble emits per line.

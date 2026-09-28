@@ -1,3 +1,5 @@
+{{- /* verify mode deploys nothing, and must not delete a cnpgen-labelled policy the user applied and is now verifying. */}}
+{{- if eq .Values.audit.mode "audit" }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -38,3 +40,4 @@ spec:
             - --scale-down-namespace
             - {{ .Release.Namespace | quote }}
             - --no-banner
+{{- end }}

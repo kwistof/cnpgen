@@ -4,15 +4,17 @@
 
 Run cnpgen in your cluster to generate a Cilium network policy from observed traffic.
 
-It runs [cnpgen](https://github.com/kwistof/cnpgen) as a long-lived `Deployment`
-that watches your pods' traffic and continuously writes a Cilium network policy
-from what it observes. The policy is deployed in **safe, non-enforcing mode**:
-cnpgen never blocks traffic on its own.
+Runs [cnpgen](https://github.com/kwistof/cnpgen) as a `Deployment` in the
+cluster, in one of two modes:
 
-## Install
+- `audit` (default): builds a policy from the traffic it sees and deploys it in
+  non-enforcing mode. It never blocks traffic.
+- `verify`: read-only. Logs every flow the policy already deployed blocks, and
+  writes the rules to add.
 
-The only two values you need are the label to watch and the namespace to
-write the policy into:
+Both run until you uninstall.
+
+## Build a policy (audit)
 
 ```bash
 helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
@@ -20,46 +22,61 @@ helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-names
   --set target.namespace=my-namespace
 ```
 
-Watch it work:
+Follow it:
 
 ```bash
 kubectl -n cnpgen logs -f deploy/cnpgen
 ```
 
-It keeps watching and refining the policy until you uninstall.
-
-## Getting the policy out
-
-cnpgen writes the generated policy files to `/out` in the pod. Pull them with
-`kubectl cp`:
+Get the policy files:
 
 ```bash
 POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath='{.items[0].metadata.name}')
 kubectl -n cnpgen cp "$POD":/out ./netpol-out
 ```
 
-Then set `enableDefaultDeny` to `true` in the policy file and apply it: that
-enforcement step is always left to you.
+To enforce, set `enableDefaultDeny` to `true` in the file and apply it.
 
-## Clean up
+## Check an existing policy (verify)
+
+```bash
+helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
+  --set target.label=app.kubernetes.io/name=my-app \
+  --set target.namespace=my-namespace \
+  --set audit.mode=verify
+```
+
+See every blocked flow:
+
+```bash
+kubectl -n cnpgen logs -f deploy/cnpgen
+```
+
+Get the rules to add to your policy:
+
+```bash
+POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath='{.items[0].metadata.name}')
+kubectl -n cnpgen cp "$POD":/out/missing-rules.yaml ./missing-rules.yaml
+```
+
+## Uninstall
 
 ```bash
 helm uninstall cnpgen -n cnpgen
 ```
 
-This removes the Deployment. The policy cnpgen deployed while learning is torn
-down when the pod stops; the files you pulled with `kubectl cp` are yours to
-keep.
+In `audit` mode, this also deletes the policy cnpgen deployed. In `verify`
+mode, nothing on the cluster is touched.
 
 ## Values
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Pod affinity. |
-| audit.dryRun | bool | `false` | Deploy in preview mode without touching the cluster. Ignored in "verify" mode, which never touches the cluster regardless. |
-| audit.duration | int | `120` | Seconds to watch per round. |
+| audit.dryRun | bool | `false` | Preview the policy without deploying it. `audit` mode only. |
+| audit.duration | int | `120` | Seconds to watch per round. `audit` mode only. |
 | audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`. |
-| audit.mode | string | `"audit"` | "audit" (default) generates and deploys a working policy from observed traffic. "verify" is read-only: it watches traffic against whatever CiliumNetworkPolicy is already deployed for target.label/target.namespace (yours or hand-written) and reports what it doesn't allow, without generating, deploying, or deleting anything. In "verify" mode, dryRun and extraArgs still apply but generate/deploy-only args (e.g. --allow-domain) are meaningless since nothing is generated. |
+| audit.mode | string | `"audit"` | `audit` builds a policy from observed traffic. `verify` is read-only: it logs every flow the policy already deployed in target.namespace blocks, and writes the rules to add to `/out/missing-rules.yaml`. |
 | ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |

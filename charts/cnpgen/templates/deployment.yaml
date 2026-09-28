@@ -48,22 +48,25 @@ spec:
             - {{ .Values.target.label | quote }}
             - -n
             - {{ .Values.target.namespace | quote }}
-            {{- if eq .Values.audit.mode "audit" }}
             - -o
+            {{- if eq .Values.audit.mode "verify" }}
+            - /out/missing-rules.yaml
+            {{- else }}
             - /out
+            - --duration
+            - {{ .Values.audit.duration | quote }}
+            {{- if .Values.audit.dryRun }}
+            - --dry-run
+            {{- end }}
             {{- end }}
             - --cilium-namespace
             - {{ .Values.ciliumNamespace | quote }}
-            - --duration
-            - {{ .Values.audit.duration | quote }}
-            {{- if and (eq .Values.audit.mode "audit") .Values.audit.dryRun }}
-            - --dry-run
-            {{- end }}
             {{- range .Values.audit.extraArgs }}
             - {{ . | quote }}
             {{- end }}
           volumeMounts:
-            # The generated policy files land here; pull them with
+            # Generated policy files (audit) or missing-rules.yaml (verify)
+            # land here; pull them with
             #   kubectl -n {{ .Release.Namespace }} cp <pod>:/out ./netpol-out
             - name: out
               mountPath: /out

@@ -1,10 +1,12 @@
 {{- if eq .Values.audit.mode "verify" }}
-cnpgen is now watching {{ .Values.target.label }} in "{{ .Values.target.namespace }}", read-only: it
-reports what the CiliumNetworkPolicy already deployed there doesn't allow,
-without generating, deploying, or deleting anything.
+cnpgen is now checking the policy for {{ .Values.target.label }} in "{{ .Values.target.namespace }}" (read-only).
 
-Watch it work:
+See every blocked flow:
   kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "cnpgen.fullname" . }}
+
+Get the rules to add to your policy:
+  POD=$(kubectl -n {{ .Release.Namespace }} get pod -l app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n {{ .Release.Namespace }} cp "$POD":/out/missing-rules.yaml ./missing-rules.yaml
 
 Stop:
   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}

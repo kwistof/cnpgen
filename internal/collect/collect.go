@@ -56,9 +56,9 @@ func epNamespace(ep hubble.Endpoint) string {
 	return labels.GetNamespace(ep.Labels)
 }
 
-// isOurs reports whether an endpoint is one of the target pods: matching both
+// IsOurs reports whether an endpoint is one of the target pods: matching both
 // `label` and `namespace`.
-func isOurs(ep hubble.Endpoint, label, namespace string) bool {
+func IsOurs(ep hubble.Endpoint, label, namespace string) bool {
 	return hasLabel(ep.Labels, label) && epNamespace(ep) == namespace
 }
 
@@ -105,7 +105,7 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		dstKey := model.Endpoint{App: dstApp, Namespace: dstNS}
 
 		// Egress: source is one of our target pods.
-		if isOurs(src, label, namespace) {
+		if IsOurs(src, label, namespace) {
 			bucket := graph.Bucket(srcApp, srcNS)
 			if dstApp == "reserved:world" {
 				ip := flow.DstIP()
@@ -119,7 +119,7 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		}
 
 		// Ingress: destination is one of our target pods (skip reserved src/dst).
-		if isOurs(dst, label, namespace) &&
+		if IsOurs(dst, label, namespace) &&
 			!strings.HasPrefix(dstApp, "reserved:") &&
 			!strings.HasPrefix(srcApp, "reserved:") {
 			bucket := graph.Bucket(dstApp, dstNS)
