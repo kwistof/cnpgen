@@ -35,6 +35,9 @@ spec:
             - cleanup
             - -n
             - {{ .Values.target.namespace | quote }}
+            # Only this release's policies: other releases may target the same namespace.
+            - -l
+            - {{ .Values.target.label | quote }}
             - --scale-down
             - {{ include "cnpgen.fullname" . }}
             - --scale-down-namespace

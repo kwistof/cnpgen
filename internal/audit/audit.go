@@ -217,7 +217,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 
 		if bootstrapDNSAttempted {
 			fmt.Println(ui.Dim("  Removing temporary DNS visibility (app policy now covers it):"))
-			removeBootstrapDNS(ctx, k, ac.Namespace)
+			removeBootstrapDNS(ctx, k, ac.Namespace, ac.Label)
 			bootstrapDNSAttempted = false
 		}
 
@@ -227,7 +227,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			break
 		}
 
-		results := deploy.ApplyAll(ctx, k, policies, false)
+		results := deploy.ApplyAll(ctx, k, policies, ac.Label, false)
 		allOK := true
 		for _, r := range results {
 			if !r.OK {
@@ -270,7 +270,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 				return policies, false, err
 			}
 			recheckSig := pipeline.Signature(policies)
-			recheckResults := deploy.ApplyAll(ctx, k, policies, false)
+			recheckResults := deploy.ApplyAll(ctx, k, policies, ac.Label, false)
 			recheckOK := true
 			for _, r := range recheckResults {
 				if !r.OK {
@@ -334,7 +334,7 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 
 	if bootstrapDNSAttempted {
 		fmt.Println(ui.Dim("\nRemoving temporary DNS visibility (no app policy took over):"))
-		removeBootstrapDNS(cleanupCtx, k, ac.Namespace)
+		removeBootstrapDNS(cleanupCtx, k, ac.Namespace, ac.Label)
 	}
 
 	// Always tidy up the non-enforcing policy we deployed while learning; the
@@ -353,12 +353,12 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 
 func deployBootstrapDNS(ctx context.Context, k *kube.Client, namespace, label string) {
 	p := generate.BootstrapDNSPolicy(namespace, label)
-	r := deploy.ApplyOne(ctx, k, p, "bootstrap-dns", false)
+	r := deploy.ApplyOne(ctx, k, p, label, "bootstrap-dns", false)
 	fmt.Printf("    %s  bootstrap-dns: %s\n", applyFlag(r.OK, r.Skipped), r.Msg)
 }
 
-func removeBootstrapDNS(ctx context.Context, k *kube.Client, namespace string) {
-	r := deploy.DeleteOne(ctx, k, generate.BootstrapDNSPolicyName, namespace, "bootstrap-dns")
+func removeBootstrapDNS(ctx context.Context, k *kube.Client, namespace, label string) {
+	r := deploy.DeleteOne(ctx, k, generate.BootstrapDNSPolicyName(label), namespace, "bootstrap-dns")
 	fmt.Printf("    %s  bootstrap-dns: %s\n", applyFlag(r.OK, r.Skipped), r.Msg)
 }
 

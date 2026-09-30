@@ -160,7 +160,7 @@ func usage() {
   cnpgen audit    -l <label> -n <namespace> [options]    watch live traffic and build a working policy
   cnpgen verify   -l <label> -n <namespace> [options]    read-only: log what the deployed policy blocks
   cnpgen generate -l <label> -n <namespace> --flows <f>  build policy files offline from a saved flows file
-  cnpgen cleanup  -n <namespace>                         delete cnpgen-managed policies from a namespace
+  cnpgen cleanup  -n <namespace> [-l <label>]            delete cnpgen-managed policies from a namespace
   cnpgen review   [-o <dir>]                             interactively accept/decline wildcard suggestions
   cnpgen version                                         print the version
 
@@ -430,7 +430,8 @@ func cmdGenerate(argv []string) int {
 	return 0
 }
 
-// cmdCleanup deletes every cnpgen-managed CiliumNetworkPolicy in a namespace.
+// cmdCleanup deletes every cnpgen-managed CiliumNetworkPolicy in a namespace,
+// or with -l only the ones an audit run with that same -l deployed.
 // It exists for the Helm chart's pre-delete hook: on `helm uninstall`, RBAC
 // and the audit Deployment can be torn down before the running pod gets a
 // chance to clean up after itself, so the policy it deployed while learning
@@ -444,16 +445,20 @@ func cmdCleanup(argv []string) int {
 	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
 	var g globalFlags
 	g.register(fs)
+	for _, name := range []string{"l", "label"} {
+		fs.Lookup(name).Usage = "only delete the policies deployed by `cnpgen audit` with this same -l"
+	}
 	var scaleDown, scaleDownNamespace string
 	fs.StringVar(&scaleDown, "scale-down", "", "scale this Deployment to 0 and wait for it to drain before deleting policies")
 	fs.StringVar(&scaleDownNamespace, "scale-down-namespace", "", "namespace of --scale-down (default: -n)")
 	fs.Usage = func() {
 		printGrouped("cleanup",
-			"Delete every cnpgen-managed CiliumNetworkPolicy from a namespace. Used by the\n"+
-				"Helm chart's pre-delete hook so `helm uninstall` doesn't leave the policy behind.",
-			"  cnpgen cleanup -n my-namespace",
+			"Delete every cnpgen-managed CiliumNetworkPolicy from a namespace, or with -l only\n"+
+				"the ones deployed by `cnpgen audit -l <same label>`. Used by the Helm chart's\n"+
+				"pre-delete hook so `helm uninstall` doesn't leave the policy behind.",
+			"  cnpgen cleanup -n my-namespace\n  cnpgen cleanup -n my-namespace -l app.kubernetes.io/name=my-app",
 			fs, [][2]any{
-				{"Target", []string{"n"}},
+				{"Target", []string{"l", "n"}},
 				{"Drain first", []string{"scale-down", "scale-down-namespace"}},
 				{"Cluster", []string{"context", "kubeconfig"}},
 				{"Misc", []string{"debug", "no-banner"}},
@@ -488,7 +493,8 @@ func cmdCleanup(argv []string) int {
 		}
 	}
 
-	names, err := k.ListManagedNames(ctx, g.namespace, generate.ManagedByLabel, generate.ManagedByValue)
+	names, err := k.ListManagedNames(ctx, g.namespace, generate.ManagedByLabel, generate.ManagedByValue,
+		generate.TargetAnnotation, g.label)
 	if err != nil {
 		return fail("listing cnpgen-managed policies in %q: %v", g.namespace, err)
 	}

@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/kwistof/cnpgen/internal/generate"
 	"github.com/kwistof/cnpgen/internal/kube"
 )
@@ -33,12 +35,21 @@ type Result struct {
 }
 
 // ApplyOne applies a single policy, only ever creating or updating a policy
-// cnpgen itself owns. If dryRun, the apply is skipped and it reports success.
-func ApplyOne(ctx context.Context, k *kube.Client, p *generate.Policy, label string, dryRun bool) Result {
+// cnpgen itself owns. target (the run's -l label) is recorded on the deployed
+// object as generate.TargetAnnotation. If dryRun, the apply is skipped and it
+// reports success.
+func ApplyOne(ctx context.Context, k *kube.Client, p *generate.Policy, target, label string, dryRun bool) Result {
 	if dryRun {
 		return Result{Label: label, OK: true, Msg: "dry-run"}
 	}
-	own, err := k.ApplyManaged(ctx, p.Object(), generate.ManagedByLabel, generate.ManagedByValue)
+	obj := &unstructured.Unstructured{Object: p.Object()}
+	ann := obj.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[generate.TargetAnnotation] = target
+	obj.SetAnnotations(ann)
+	own, err := k.ApplyManaged(ctx, obj.Object, generate.ManagedByLabel, generate.ManagedByValue)
 	if err != nil {
 		return Result{Label: label, OK: false, Msg: err.Error()}
 	}
@@ -72,10 +83,10 @@ func DeleteOne(ctx context.Context, k *kube.Client, name, namespace, label strin
 }
 
 // ApplyAll applies every policy, in order. Returns the results.
-func ApplyAll(ctx context.Context, k *kube.Client, policies []*generate.Policy, dryRun bool) []Result {
+func ApplyAll(ctx context.Context, k *kube.Client, policies []*generate.Policy, target string, dryRun bool) []Result {
 	results := make([]Result, 0, len(policies))
 	for _, p := range policies {
-		results = append(results, ApplyOne(ctx, k, p, p.FileName(), dryRun))
+		results = append(results, ApplyOne(ctx, k, p, target, p.FileName(), dryRun))
 	}
 	return results
 }

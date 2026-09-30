@@ -27,8 +27,31 @@ const (
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 	ManagedByValue = "cnpgen"
 
-	BootstrapDNSPolicyName = "cnpgen-bootstrap-dns"
+	// TargetAnnotation records, on every policy cnpgen deploys, the -l label
+	// of the run that deployed it, so `cleanup -l` only removes that run's
+	// policies when several runs share a namespace.
+	TargetAnnotation = "cnpgen/label"
 )
+
+// BootstrapDNSPolicyName is the name of the standalone DNS-visibility policy
+// for label. It's per label, so several cnpgen runs deploying into the same
+// namespace each get their own and never delete one another's.
+func BootstrapDNSPolicyName(label string) string {
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, label)
+	name = strings.Trim("cnpgen-bootstrap-dns-"+name, "-.")
+	if len(name) > 253 {
+		name = strings.TrimRight(name[:253], "-.")
+	}
+	return name
+}
 
 // wellKnownIPComment annotates a handful of fixed IPs that never resolve to a
 // real domain name, so an unresolved toCIDR fallback at least says what the
@@ -178,12 +201,12 @@ func BootstrapDNSPolicy(namespace, label string) *Policy {
 		set("apiVersion", "cilium.io/v2").
 		set("kind", "CiliumNetworkPolicy").
 		set("metadata", newOMap().
-			set("name", BootstrapDNSPolicyName).
+			set("name", BootstrapDNSPolicyName(label)).
 			set("namespace", namespace).
 			set("labels", newOMap().set(ManagedByLabel, ManagedByValue))).
 		set("spec", spec)
 
-	return &Policy{Name: BootstrapDNSPolicyName, Namespace: namespace, doc: doc}
+	return &Policy{Name: BootstrapDNSPolicyName(label), Namespace: namespace, doc: doc}
 }
 
 // routeExternal splits egress_external into FQDN groups (per port) and CIDR

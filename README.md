@@ -60,6 +60,17 @@ When the file looks right, set `enableDefaultDeny` to `true` and apply it.
 
 See `cnpgen audit -h` for all options (`--allow-domain`, `--known-ip`, `--allow-extra`, ...).
 
+### Several apps at once
+
+Run one `cnpgen audit` per app, at the same time (separate terminals, or one Helm release each). They can share a namespace and the output directory:
+
+```bash
+cnpgen audit -l app.kubernetes.io/name=frontend -n webshop
+cnpgen audit -l app.kubernetes.io/name=backend  -n webshop
+```
+
+Each run adds one `hubble observe` process in every Cilium agent pod, about 15 MB each.
+
 ---
 
 ## Check an existing policy: `cnpgen verify`
@@ -92,6 +103,8 @@ Read-only. It watches the pods against the policy already deployed (any policy, 
   Copy each entry into the `egress`/`ingress` list of your policy.
 
 If no policy selects the pods, nothing is blocked, so nothing is reported.
+
+When running several `verify` at once, give each its own `-o` file.
 
 ---
 

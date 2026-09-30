@@ -71,35 +71,20 @@ func GeneratePoliciesFromGraph(graph *model.ConnGraph, namespace string, index *
 	return out
 }
 
-// WritePolicies writes each policy to outdir/<file>, and removes any other
-// .yaml/.yml file already there (outdir is treated as owned by the current
-// run). Returns the file paths written.
+// WritePolicies writes each policy to outdir/<file> and returns the file
+// paths written. Other files already in outdir are left alone: several cnpgen
+// runs (one per app) may share the same output directory.
 func WritePolicies(policies []*generate.Policy, outdir string) ([]string, error) {
 	if err := os.MkdirAll(outdir, 0o755); err != nil {
 		return nil, err
 	}
 	var paths []string
-	keep := map[string]struct{}{}
 	for _, p := range policies {
-		name := p.FileName()
-		path := filepath.Join(outdir, name)
+		path := filepath.Join(outdir, p.FileName())
 		if err := os.WriteFile(path, []byte(p.YAML()), 0o644); err != nil {
 			return nil, err
 		}
 		paths = append(paths, path)
-		keep[name] = struct{}{}
-	}
-	entries, err := os.ReadDir(outdir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-			if _, ok := keep[name]; !ok {
-				_ = os.Remove(filepath.Join(outdir, name))
-			}
-		}
 	}
 	return paths, nil
 }

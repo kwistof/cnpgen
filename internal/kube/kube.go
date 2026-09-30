@@ -14,8 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -230,24 +228,26 @@ func (c *Client) Exec(ctx context.Context, pod string, argv []string) (stdout, s
 // allocated (cnpgen never allocates one), there's no pty to hang up on, so
 // whether the remote process notices its stdout pipe has gone away is up to
 // that process. `hubble observe --follow` does not. Callers that need the
-// remote process gone (not just disconnected from) must call KillMatching
+// remote process gone (not just disconnected from) must call KillHubble
 // after ExecStream returns.
 func (c *Client) ExecStream(ctx context.Context, pod string, argv []string, w io.Writer) error {
 	return c.stream(ctx, pod, argv, nil, w, io.Discard)
 }
 
-// KillMatching best-effort kills any process in pod whose command line
-// exactly matches argv, via `pkill -f`. Used to clean up an exec'd process
-// that ExecStream's context cancellation alone won't terminate. It uses its
-// own short-lived context so it still runs after the caller's ctx (the one
-// that governed the now-stopped ExecStream) is already cancelled; failures
-// are swallowed since this is opportunistic cleanup, not load-bearing for
-// correctness.
-func (c *Client) KillMatching(pod string, argv []string) {
+// KillHubble best-effort kills the `hubble` process with PID pid in pod. Used
+// to clean up an exec'd process that ExecStream's context cancellation alone
+// won't terminate. Killing by PID (rather than by command line) only ever
+// stops this cnpgen's own stream, never another cnpgen's watching the same
+// label. It checks the PID still is a hubble process first, in case the
+// agent restarted and the PID got reused. It uses its own short-lived context
+// so it still runs after the caller's ctx (the one that governed the
+// now-stopped ExecStream) is already cancelled; failures are swallowed since
+// this is opportunistic cleanup, not load-bearing for correctness.
+func (c *Client) KillHubble(pod string, pid int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pattern := "^" + regexp.QuoteMeta(strings.Join(argv, " ")) + "$"
-	_, _, _ = c.Exec(ctx, pod, []string{"pkill", "-f", pattern})
+	script := fmt.Sprintf(`[ "$(cat /proc/%d/comm 2>/dev/null)" = hubble ] && kill %d`, pid, pid)
+	_, _, _ = c.Exec(ctx, pod, []string{"sh", "-c", script})
 }
 
 func (c *Client) stream(ctx context.Context, pod string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -298,8 +298,9 @@ const (
 )
 
 // ListManagedNames returns the names of every CiliumNetworkPolicy in
-// namespace carrying cnpgen's managed-by label.
-func (c *Client) ListManagedNames(ctx context.Context, namespace, managedByLabel, managedByValue string) ([]string, error) {
+// namespace carrying cnpgen's managed-by label, and, if annotationValue isn't
+// empty, annotation annotationKey set to exactly annotationValue.
+func (c *Client) ListManagedNames(ctx context.Context, namespace, managedByLabel, managedByValue, annotationKey, annotationValue string) ([]string, error) {
 	list, err := c.dyn.Resource(cnpGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: managedByLabel + "=" + managedByValue,
 	})
@@ -308,6 +309,9 @@ func (c *Client) ListManagedNames(ctx context.Context, namespace, managedByLabel
 	}
 	names := make([]string, 0, len(list.Items))
 	for _, item := range list.Items {
+		if annotationValue != "" && item.GetAnnotations()[annotationKey] != annotationValue {
+			continue
+		}
 		names = append(names, item.GetName())
 	}
 	return names, nil

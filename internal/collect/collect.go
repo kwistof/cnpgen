@@ -277,7 +277,9 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 		return &Follower{}, nil
 	}
 
-	argv := observeCmd(label, 0, true, "")
+	// Run hubble through sh so its PID comes back as the first stdout line
+	// (exec keeps the PID): teardown kills exactly this process, see below.
+	argv := append([]string{"sh", "-c", `echo "$$"; exec "$@"`, "sh"}, observeCmd(label, 0, true, "")...)
 	f := &Follower{}
 	for _, pod := range pods {
 		f.wg.Add(1)
@@ -285,9 +287,13 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 			defer f.wg.Done()
 			pr, pw := io.Pipe()
 			done := make(chan struct{})
+			pid := 0
 			go func() {
 				sc := bufio.NewScanner(pr)
 				sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+				if sc.Scan() {
+					pid, _ = strconv.Atoi(strings.TrimSpace(sc.Text()))
+				}
 				for sc.Scan() {
 					line := strings.TrimSpace(sc.Text())
 					if line == "" {
@@ -299,6 +305,8 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 					}
 					onFlow(fl)
 				}
+				// Keep draining so the exec never blocks on a full pipe.
+				_, _ = io.Copy(io.Discard, pr)
 				close(done)
 			}()
 			err := k.ExecStream(ctx, pod.Name, argv, pw)
@@ -309,8 +317,11 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 			// process on the agent: with no TTY there's no pty hangup, and
 			// `hubble observe --follow` doesn't exit on its own when its
 			// stdout pipe goes away. Explicitly kill it so it doesn't run
-			// forever as an orphan.
-			k.KillMatching(pod.Name, argv)
+			// forever as an orphan. By PID, not by command line: another
+			// cnpgen may be running the exact same command for the same label.
+			if pid > 0 {
+				k.KillHubble(pod.Name, pid)
+			}
 			if err != nil {
 				f.mu.Lock()
 				f.errs = append(f.errs, fmt.Errorf("%s: %w", pod.Name, err))

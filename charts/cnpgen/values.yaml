@@ -27,7 +27,8 @@ image:
 # -- Namespace where the Cilium agent pods run, cnpgen execs into them. Since
 # this chart runs `cnpgen audit` as a long-lived Deployment, expect one
 # long-lived `hubble observe --follow` exec session per Cilium agent pod for
-# the lifetime of this release.
+# the lifetime of this release (about 15 MB in each agent pod). Install one
+# release per app to audit several apps at once; they can share a namespace.
 ciliumNamespace: kube-system
 
 rbac:

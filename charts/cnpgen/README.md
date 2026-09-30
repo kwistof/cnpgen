@@ -77,7 +77,7 @@ mode, nothing on the cluster is touched.
 | audit.duration | int | `120` | Seconds to watch per round. `audit` mode only. |
 | audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`. |
 | audit.mode | string | `"audit"` | `audit` builds a policy from observed traffic. `verify` is read-only: it logs every flow the policy already deployed in target.namespace blocks, and writes the rules to add to `/out/missing-rules.yaml`. |
-| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release. |
+| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release (about 15 MB in each agent pod). Install one release per app to audit several apps at once; they can share a namespace. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |
 | image.tag | string | `""` | Image tag. Defaults to the chart's `appVersion`. |

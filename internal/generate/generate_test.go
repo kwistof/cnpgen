@@ -109,3 +109,17 @@ func TestReservedAppNoPolicy(t *testing.T) {
 		t.Error("reserved identity should not yield a policy")
 	}
 }
+
+func TestBootstrapDNSPolicyNameIsPerLabel(t *testing.T) {
+	a := BootstrapDNSPolicyName("app.kubernetes.io/name=frontend")
+	b := BootstrapDNSPolicyName("app.kubernetes.io/name=backend")
+	if a != "cnpgen-bootstrap-dns-app.kubernetes.io-name-frontend" {
+		t.Errorf("unexpected name %q", a)
+	}
+	if a == b {
+		t.Errorf("two labels got the same name %q", a)
+	}
+	if got := BootstrapDNSPolicyName("App=My_App"); got != "cnpgen-bootstrap-dns-app-my-app" {
+		t.Errorf("unexpected name %q", got)
+	}
+}
