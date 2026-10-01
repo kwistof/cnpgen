@@ -128,15 +128,12 @@ type portProto struct {
 	Proto string
 }
 
-// buildPorts builds a Cilium toPorts list ([]any of one omap) from port/proto
-// pairs. Dedups, skips port 0. Returns nil if empty.
-func buildPorts(pps []portProto) []any {
-	type pp struct {
-		port  string
-		proto string
-	}
-	var ordered []pp
-	seen := map[pp]struct{}{}
+// canonicalPorts normalizes port/proto pairs the way they're rendered: drops
+// port 0, defaults proto to TCP, dedups, and sorts (port as a string, then
+// proto).
+func canonicalPorts(pps []portProto) []portProto {
+	var ordered []portProto
+	seen := map[portProto]struct{}{}
 	sorted := append([]portProto(nil), pps...)
 	sort.Slice(sorted, func(i, j int) bool {
 		pi := strconv.Itoa(int(sorted[i].Port))
@@ -150,25 +147,95 @@ func buildPorts(pps []portProto) []any {
 		if x.Port == 0 {
 			continue
 		}
-		proto := x.Proto
-		if proto == "" {
-			proto = "TCP"
+		if x.Proto == "" {
+			x.Proto = "TCP"
 		}
-		key := pp{port: strconv.Itoa(int(x.Port)), proto: proto}
-		if _, ok := seen[key]; ok {
+		if _, ok := seen[x]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
-		ordered = append(ordered, key)
+		seen[x] = struct{}{}
+		ordered = append(ordered, x)
 	}
+	return ordered
+}
+
+// buildPorts builds a Cilium toPorts list ([]any of one omap) from port/proto
+// pairs. Dedups, skips port 0. Returns nil if empty.
+func buildPorts(pps []portProto) []any {
+	ordered := canonicalPorts(pps)
 	if len(ordered) == 0 {
 		return nil
 	}
 	var ports []any
 	for _, x := range ordered {
-		ports = append(ports, newOMap().set("port", x.port).set("protocol", x.proto))
+		ports = append(ports, newOMap().set("port", strconv.Itoa(int(x.Port))).set("protocol", x.Proto))
 	}
 	return []any{newOMap().set("ports", ports)}
+}
+
+// portSetKey identifies a port set independent of order and duplicates, so
+// peers allowed on exactly the same ports can share one rule.
+func portSetKey(pps []portProto) string {
+	var parts []string
+	for _, x := range canonicalPorts(pps) {
+		parts = append(parts, strconv.Itoa(int(x.Port))+"/"+x.Proto)
+	}
+	return strings.Join(parts, ",")
+}
+
+// peerSelector builds the matchLabels selector for an in-cluster peer, adding
+// its namespace when it differs from the policy's own. Returns nil if the app
+// has no label selector.
+func peerSelector(peer model.Endpoint, ns string) *omap {
+	sel := labels.AppToLabelSelector(peer.App)
+	if sel == nil {
+		return nil
+	}
+	ml := newOMap()
+	for _, k := range sortedMapKeys(sel) {
+		ml.set(k, sel[k])
+	}
+	if peer.Namespace != "" && peer.Namespace != ns {
+		ml.set("io.kubernetes.pod.namespace", peer.Namespace)
+	}
+	return newOMap().set("matchLabels", ml)
+}
+
+// selectorGrouper merges in-cluster peers allowed on the same port set into a
+// single rule listing every peer under field (fromEndpoints/toEndpoints).
+// Cilium ORs the selectors in that list and ANDs them with the rule's
+// toPorts, so merging peers with identical port sets allows exactly the same
+// traffic as one rule per peer.
+type selectorGrouper struct {
+	field  string
+	groups map[string]*omap
+}
+
+func newSelectorGrouper(field string) *selectorGrouper {
+	return &selectorGrouper{field: field, groups: map[string]*omap{}}
+}
+
+// add appends sel to the existing rule for pps if there is one and returns
+// nil; else it returns a new rule the caller must append. A rule added with
+// alone set is never merged into or with (see appendBoilerplate's kube-dns
+// handling, which expects that rule to hold a single selector).
+func (g *selectorGrouper) add(sel *omap, pps []portProto, alone bool) *omap {
+	key := portSetKey(pps)
+	if !alone {
+		if rule, ok := g.groups[key]; ok {
+			list, _ := rule.get(g.field)
+			rule.set(g.field, append(list.([]any), sel))
+			return nil
+		}
+	}
+	rule := newOMap().set(g.field, []any{sel})
+	if ports := buildPorts(pps); ports != nil {
+		rule.set("toPorts", ports)
+	}
+	if !alone {
+		g.groups[key] = rule
+	}
+	return rule
 }
 
 // BootstrapDNSPolicy is a standalone DNS-visibility policy for when no app
@@ -374,23 +441,15 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 	for c := range bucket.IngressApps {
 		ingressMap[c.Peer] = append(ingressMap[c.Peer], portProto{c.Port, c.Proto})
 	}
+	ingressGroups := newSelectorGrouper("fromEndpoints")
 	for _, peer := range sortedEndpoints(ingressMap) {
-		srcSel := labels.AppToLabelSelector(peer.App)
-		if srcSel == nil {
+		sel := peerSelector(peer, ns)
+		if sel == nil {
 			continue
 		}
-		ml := newOMap()
-		for _, k := range sortedMapKeys(srcSel) {
-			ml.set(k, srcSel[k])
+		if rule := ingressGroups.add(sel, ingressMap[peer], false); rule != nil {
+			ingressRules = append(ingressRules, rule)
 		}
-		if peer.Namespace != "" && peer.Namespace != ns {
-			ml.set("io.kubernetes.pod.namespace", peer.Namespace)
-		}
-		rule := newOMap().set("fromEndpoints", []any{newOMap().set("matchLabels", ml)})
-		if ports := buildPorts(ingressMap[peer]); ports != nil {
-			rule.set("toPorts", ports)
-		}
-		ingressRules = append(ingressRules, rule)
 	}
 
 	// ---- egress to apps ----
@@ -398,6 +457,7 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 	for c := range bucket.EgressApps {
 		egressMap[c.Peer] = append(egressMap[c.Peer], portProto{c.Port, c.Proto})
 	}
+	egressGroups := newSelectorGrouper("toEndpoints")
 	for _, peer := range sortedEndpoints(egressMap) {
 		var rule *omap
 		switch {
@@ -406,18 +466,15 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 		case strings.HasPrefix(peer.App, "reserved:host"):
 			rule = newOMap().set("toEntities", []any{"host"})
 		default:
-			dstSel := labels.AppToLabelSelector(peer.App)
-			if dstSel == nil {
+			sel := peerSelector(peer, ns)
+			if sel == nil {
 				continue
 			}
-			ml := newOMap()
-			for _, k := range sortedMapKeys(dstSel) {
-				ml.set(k, dstSel[k])
+			isKubeDNS := labels.AppToLabelSelector(peer.App)["k8s-app"] == "kube-dns"
+			if rule = egressGroups.add(sel, egressMap[peer], isKubeDNS); rule != nil {
+				egressRules = append(egressRules, rule)
 			}
-			if peer.Namespace != "" && peer.Namespace != ns {
-				ml.set("io.kubernetes.pod.namespace", peer.Namespace)
-			}
-			rule = newOMap().set("toEndpoints", []any{newOMap().set("matchLabels", ml)})
+			continue
 		}
 		if ports := buildPorts(egressMap[peer]); ports != nil {
 			rule.set("toPorts", ports)

@@ -123,3 +123,48 @@ func TestBootstrapDNSPolicyNameIsPerLabel(t *testing.T) {
 		t.Errorf("unexpected name %q", got)
 	}
 }
+
+func TestPeersWithSamePortsShareARule(t *testing.T) {
+	app := func(name string) string { return "k8s:app.kubernetes.io/name=" + name }
+	b := &model.ConnBucket{
+		IngressApps: map[model.AppConn]int{
+			{Peer: model.Endpoint{App: app("gateway"), Namespace: "istio"}, Port: 8080, Proto: "TCP"}: 1,
+			{Peer: model.Endpoint{App: app("back"), Namespace: "webshop"}, Port: 8080, Proto: "TCP"}:  1,
+			{Peer: model.Endpoint{App: app("ms"), Namespace: "api"}, Port: 8080, Proto: "TCP"}:        1,
+			{Peer: model.Endpoint{App: app("ms"), Namespace: "api"}, Port: 9080, Proto: "TCP"}:        1,
+			{Peer: model.Endpoint{App: app("ms"), Namespace: "bff"}, Port: 9080, Proto: "TCP"}:        1,
+			{Peer: model.Endpoint{App: app("ms"), Namespace: "bff"}, Port: 8080, Proto: "TCP"}:        1,
+		},
+		EgressApps: map[model.AppConn]int{
+			{Peer: model.Endpoint{App: "k8s:k8s-app=kube-dns", Namespace: "kube-system"}, Port: 53, Proto: "UDP"}: 1,
+			{Peer: model.Endpoint{App: app("other-dns"), Namespace: "dns"}, Port: 53, Proto: "UDP"}:               1,
+			{Peer: model.Endpoint{App: app("db"), Namespace: "data"}, Port: 5432, Proto: "TCP"}:                   1,
+			{Peer: model.Endpoint{App: app("cache"), Namespace: "data"}, Port: 5432, Proto: "TCP"}:                1,
+		},
+		EgressExternal: map[model.ExtConn]int{},
+	}
+	p := BuildPolicy(app("api"), "api", b, model.NewResolveIndex(), settings.Settings{}, false, true, nil)
+	plain := p.Object()["spec"].(map[string]any)
+
+	countSelectors := func(dir, field string) []int {
+		var counts []int
+		for _, r := range plain[dir].([]any) {
+			if sels, ok := r.(map[string]any)[field]; ok {
+				counts = append(counts, len(sels.([]any)))
+			}
+		}
+		return counts
+	}
+	// Ingress: {gateway, back} on 8080, {ms@api, ms@bff} on 8080+9080.
+	if got := countSelectors("ingress", "fromEndpoints"); len(got) != 2 || got[0] != 2 || got[1] != 2 {
+		t.Errorf("ingress selectors per rule = %v, want [2 2]:\n%s", got, p.YAML())
+	}
+	// Egress: {cache, db} on 5432, kube-dns alone, other-dns alone (it would
+	// share 53/UDP with kube-dns, but kube-dns is never merged).
+	if got := countSelectors("egress", "toEndpoints"); len(got) != 3 || got[0] != 2 || got[1] != 1 || got[2] != 1 {
+		t.Errorf("egress selectors per rule = %v, want [2 1 1]:\n%s", got, p.YAML())
+	}
+	if !strings.Contains(p.YAML(), "matchPattern: '*'") && !strings.Contains(p.YAML(), `matchPattern: "*"`) {
+		t.Errorf("DNS visibility should be merged into the kube-dns rule:\n%s", p.YAML())
+	}
+}
