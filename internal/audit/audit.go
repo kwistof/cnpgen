@@ -319,12 +319,10 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 	}
 
 	// Tear down the persistent flow watch before finalizing (stopFollow is
-	// also deferred, but calling it here surfaces any per-pod exec error in
-	// this run's own logs before Run returns).
+	// also deferred, but no flow should land in the windows once
+	// finalizing starts).
 	stopFollow()
-	if err := follower.Wait(); err != nil {
-		ui.Warn("flow watch: %v", err)
-	}
+	follower.Wait()
 
 	finalize(policies, ac.OutDir)
 

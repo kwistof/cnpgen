@@ -12,8 +12,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -260,13 +258,20 @@ func CollectLast(ctx context.Context, k *kube.Client, label string, last int, ce
 // round) filter/collect from onFlow themselves rather than starting a new
 // exec per window.
 type Follower struct {
-	wg   sync.WaitGroup
-	errs []error
-	mu   sync.Mutex
+	wg sync.WaitGroup
 }
 
 // StartFollow starts the persistent per-pod streams and returns immediately;
 // call Wait to block until ctx is cancelled and every stream has torn down.
+// A stream that fails is reported with a warning as soon as it does, not at
+// teardown, so a watch that never saw anything can't pass for a quiet one.
+//
+// Known limitation: the remote `hubble observe --follow` process is not
+// killed at teardown and keeps running in the agent container until that
+// pod restarts. Cancelling the exec doesn't stop it (no TTY, and hubble
+// ignores its stdout going away; a TTY doesn't help either), and killing it
+// needs a binary (sh, kill, pkill) that minimal Cilium agent images, like
+// AKS's, don't ship.
 func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(*hubble.Flow)) (*Follower, error) {
 	pods, err := k.CiliumPods(ctx)
 	if err != nil {
@@ -277,9 +282,7 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 		return &Follower{}, nil
 	}
 
-	// Run hubble through sh so its PID comes back as the first stdout line
-	// (exec keeps the PID): teardown kills exactly this process, see below.
-	argv := append([]string{"sh", "-c", `echo "$$"; exec "$@"`, "sh"}, observeCmd(label, 0, true, "")...)
+	argv := observeCmd(label, 0, true, "")
 	f := &Follower{}
 	for _, pod := range pods {
 		f.wg.Add(1)
@@ -287,13 +290,9 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 			defer f.wg.Done()
 			pr, pw := io.Pipe()
 			done := make(chan struct{})
-			pid := 0
 			go func() {
 				sc := bufio.NewScanner(pr)
 				sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
-				if sc.Scan() {
-					pid, _ = strconv.Atoi(strings.TrimSpace(sc.Text()))
-				}
 				for sc.Scan() {
 					line := strings.TrimSpace(sc.Text())
 					if line == "" {
@@ -312,20 +311,12 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 			err := k.ExecStream(ctx, pod.Name, argv, pw)
 			pw.Close()
 			<-done
-			// ExecStream's context cancellation closes cnpgen's side of the
-			// connection but does not, by itself, terminate the exec'd
-			// process on the agent: with no TTY there's no pty hangup, and
-			// `hubble observe --follow` doesn't exit on its own when its
-			// stdout pipe goes away. Explicitly kill it so it doesn't run
-			// forever as an orphan. By PID, not by command line: another
-			// cnpgen may be running the exact same command for the same label.
-			if pid > 0 {
-				k.KillHubble(pod.Name, pid)
-			}
 			if err != nil {
-				f.mu.Lock()
-				f.errs = append(f.errs, fmt.Errorf("%s: %w", pod.Name, err))
-				f.mu.Unlock()
+				ui.Warn("flow watch stopped on %s (%s), its node's traffic is no longer watched: %s",
+					pod.Name, pod.Node, lastLine(err.Error()))
+			} else if ctx.Err() == nil {
+				ui.Warn("flow watch ended on %s (%s), its node's traffic is no longer watched",
+					pod.Name, pod.Node)
 			}
 		}(pod)
 	}
@@ -333,13 +324,9 @@ func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(
 }
 
 // Wait blocks until every per-pod stream has torn down (i.e. until the ctx
-// passed to StartFollow is cancelled) and returns any exec errors joined
-// together.
-func (f *Follower) Wait() error {
+// passed to StartFollow is cancelled).
+func (f *Follower) Wait() {
 	f.wg.Wait()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return errors.Join(f.errs...)
 }
 
 func lastLine(s string) string {

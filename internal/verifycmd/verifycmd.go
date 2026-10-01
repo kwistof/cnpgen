@@ -90,9 +90,7 @@ func Run(ctx context.Context, k *kube.Client, cfg Config) error {
 		case <-ctx.Done():
 		}
 	}
-	if err := follower.Wait(); err != nil {
-		ui.Warn("flow watch: %v", err)
-	}
+	follower.Wait()
 
 	w.flush()
 	w.mu.Lock()

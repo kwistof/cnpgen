@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -207,10 +208,29 @@ func (c *Client) CiliumPods(ctx context.Context) ([]Pod, error) {
 				continue
 			}
 		}
+		// A pod whose agent isn't running (node joining, draining or being
+		// upgraded) can't be exec'd into; trying only produces warnings.
+		if !agentRunning(&p) {
+			ui.Log("Skipping %s (%s): %s container not running", p.Name, node, ciliumContainer)
+			continue
+		}
 		pods = append(pods, Pod{Name: p.Name, Node: node})
 	}
 	ui.Log("Selected %d cilium pod(s)", len(pods))
 	return pods, nil
+}
+
+// agentRunning reports whether p's Cilium agent container is running.
+func agentRunning(p *corev1.Pod) bool {
+	if p.DeletionTimestamp != nil {
+		return false
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.Name == ciliumContainer {
+			return cs.State.Running != nil
+		}
+	}
+	return false
 }
 
 // Exec runs argv in a Cilium pod and returns combined stdout / stderr.
@@ -221,33 +241,19 @@ func (c *Client) Exec(ctx context.Context, pod string, argv []string) (stdout, s
 }
 
 // ExecStream runs argv in a Cilium pod, writing stdout to w as it arrives.
-// Cancel ctx to stop it. Used for `hubble observe --follow`.
+// Cancel ctx to stop it. Used for `hubble observe --follow`. If it fails,
+// the error carries the command's own stderr, if any.
 //
-// Cancelling ctx closes cnpgen's side of the exec connection, but that alone
-// does not guarantee the process inside the container exits: with no TTY
-// allocated (cnpgen never allocates one), there's no pty to hang up on, so
-// whether the remote process notices its stdout pipe has gone away is up to
-// that process. `hubble observe --follow` does not. Callers that need the
-// remote process gone (not just disconnected from) must call KillHubble
-// after ExecStream returns.
+// Cancelling ctx only closes cnpgen's side of the exec connection: the
+// process inside the container keeps running (no TTY, and `hubble observe
+// --follow` doesn't notice its stdout going away).
 func (c *Client) ExecStream(ctx context.Context, pod string, argv []string, w io.Writer) error {
-	return c.stream(ctx, pod, argv, nil, w, io.Discard)
-}
-
-// KillHubble best-effort kills the `hubble` process with PID pid in pod. Used
-// to clean up an exec'd process that ExecStream's context cancellation alone
-// won't terminate. Killing by PID (rather than by command line) only ever
-// stops this cnpgen's own stream, never another cnpgen's watching the same
-// label. It checks the PID still is a hubble process first, in case the
-// agent restarted and the PID got reused. It uses its own short-lived context
-// so it still runs after the caller's ctx (the one that governed the
-// now-stopped ExecStream) is already cancelled; failures are swallowed since
-// this is opportunistic cleanup, not load-bearing for correctness.
-func (c *Client) KillHubble(pod string, pid int) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	script := fmt.Sprintf(`[ "$(cat /proc/%d/comm 2>/dev/null)" = hubble ] && kill %d`, pid, pid)
-	_, _, _ = c.Exec(ctx, pod, []string{"sh", "-c", script})
+	var errBuf bytes.Buffer
+	err := c.stream(ctx, pod, argv, nil, w, &errBuf)
+	if s := strings.TrimSpace(errBuf.String()); err != nil && s != "" {
+		return fmt.Errorf("%w: %s", err, s)
+	}
+	return err
 }
 
 func (c *Client) stream(ctx context.Context, pod string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
