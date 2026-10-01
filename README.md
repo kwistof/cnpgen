@@ -6,7 +6,7 @@
          /_/    /____/
 
    Cilium Network Policy Generator
-           by kwistof - v0.4.0
+           by kwistof - v0.4.1
 ```
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
