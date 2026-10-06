@@ -46,6 +46,13 @@ var cnpGVR = schema.GroupVersionResource{
 	Resource: "ciliumnetworkpolicies",
 }
 
+// ccnpGVR is the GroupVersionResource for CiliumClusterwideNetworkPolicy.
+var ccnpGVR = schema.GroupVersionResource{
+	Group:    "cilium.io",
+	Version:  "v2",
+	Resource: "ciliumclusterwidenetworkpolicies",
+}
+
 // Pod is a discovered Cilium agent pod.
 type Pod struct {
 	Name string
@@ -321,6 +328,30 @@ func (c *Client) ListManagedNames(ctx context.Context, namespace, managedByLabel
 		names = append(names, item.GetName())
 	}
 	return names, nil
+}
+
+// ListPolicies returns every CiliumNetworkPolicy in namespace ("" for all
+// namespaces), as raw objects.
+func (c *Client) ListPolicies(ctx context.Context, namespace string) ([]map[string]any, error) {
+	return c.listRaw(ctx, c.dyn.Resource(cnpGVR).Namespace(namespace))
+}
+
+// ListClusterwidePolicies returns every CiliumClusterwideNetworkPolicy, as
+// raw objects.
+func (c *Client) ListClusterwidePolicies(ctx context.Context) ([]map[string]any, error) {
+	return c.listRaw(ctx, c.dyn.Resource(ccnpGVR))
+}
+
+func (c *Client) listRaw(ctx context.Context, res dynamic.ResourceInterface) ([]map[string]any, error) {
+	list, err := res.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	objs := make([]map[string]any, 0, len(list.Items))
+	for _, item := range list.Items {
+		objs = append(objs, item.Object)
+	}
+	return objs, nil
 }
 
 // ApplyManaged creates or updates a CiliumNetworkPolicy, but only ever

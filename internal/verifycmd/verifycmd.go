@@ -1,13 +1,18 @@
 // Package verifycmd watches live traffic against whatever CiliumNetworkPolicy
-// is already deployed for a target (cnpgen's own, hand written, or from any
-// other tool) and reports what it does not allow. It never generates, deploys,
-// or deletes anything on the cluster.
+// is already deployed (cnpgen's own, hand written, or from any other tool)
+// and reports what it does not allow. It never generates, deploys, or deletes
+// anything on the cluster.
 //
 // It runs as one never-ending pass: every blocked flow is logged as it
-// arrives, and a rules file with the egress/ingress entries that would allow
-// them is rewritten (at most every few seconds) when a new one shows up.
-// Memory is bounded by the number of distinct missing rules, never by traffic
-// volume: flows are classified and dropped as they arrive.
+// arrives, and rules files with the egress/ingress entries that would allow
+// them are rewritten (at most every few seconds) when a new one shows up.
+// With a label (-l), it checks one set of pods and writes one file. With
+// --all, it checks every policy in the cluster (or a namespace) through a
+// single flow stream per Cilium agent, and writes one file per policy that
+// misses rules.
+//
+// Memory is bounded by the number of distinct missing rules and of policies,
+// never by traffic volume: flows are classified and dropped as they arrive.
 package verifycmd
 
 import (
@@ -28,16 +33,18 @@ import (
 	"github.com/kwistof/cnpgen/internal/labels"
 	"github.com/kwistof/cnpgen/internal/model"
 	"github.com/kwistof/cnpgen/internal/pipeline"
+	"github.com/kwistof/cnpgen/internal/policyindex"
 	"github.com/kwistof/cnpgen/internal/resolve"
 	"github.com/kwistof/cnpgen/internal/ui"
 )
 
-// maxRules caps the number of distinct (peer, port) entries kept, so a pod
-// talking to an unbounded set of raw IPs can't grow memory forever. Past the
-// cap, blocked flows are still logged, just no longer added to the file.
+// maxRules caps the number of distinct (peer, port) entries kept across all
+// files, so pods talking to an unbounded set of raw IPs can't grow memory
+// forever. Past the cap, blocked flows are still logged, just no longer
+// added to a file.
 const maxRules = 10000
 
-// writeEvery rate-limits rewriting the rules file: rendering is O(rules), so
+// writeEvery rate-limits rewriting rules files: rendering is O(rules), so
 // rewriting on every new rule would churn memory when many arrive at once.
 const writeEvery = 2 * time.Second
 
@@ -45,58 +52,132 @@ const writeEvery = 2 * time.Second
 // flow goes to an external IP the current snapshot doesn't know yet.
 const fqdnRefreshEvery = time.Minute
 
+// policyRefreshEvery is how often the deployed policies are re-listed, so
+// edits (e.g. a rule just added from a missing-rules file) are picked up.
+// A blocked flow no policy explains triggers an earlier re-list, at most
+// every policyRefreshMin.
+const (
+	policyRefreshEvery = 30 * time.Second
+	policyRefreshMin   = 5 * time.Second
+)
+
+// blockedCEL is the Hubble-side version of blocked: policy_match_type 4, or
+// a drop with reason 133 (POLICY_DENIED; Hubble's CEL compares enums by
+// number). Flows it rejects never leave the agent, which matters most with
+// --all, where the stream is otherwise every flow on the node.
+const blockedCEL = "_flow.policy_match_type == 4u || _flow.drop_reason_desc == 133"
+
 // Config holds the verify run parameters.
 type Config struct {
+	// Label and Namespace select the pods to check. With All, Label is ""
+	// and Namespace, if set, only restricts which policies are checked.
 	Label     string
 	Namespace string
-	Out       string // rules file, rewritten as new missing rules appear
+	All       bool
+	Out       string // rules file, or with All a directory of them
 	FqdnDump  string // resolve from this saved dump instead of the live cache
 }
 
 // Run watches until ctx is cancelled (Ctrl+C / SIGTERM). It never writes to
 // the cluster.
 func Run(ctx context.Context, k *kube.Client, cfg Config) error {
-	target := pipeline.DescribeTarget(cfg.Label, cfg.Namespace)
-	fmt.Println(ui.Bold(fmt.Sprintf("Verifying %s.", target)))
-	fmt.Println(ui.Dim(fmt.Sprintf("  Read-only. Logs every flow the deployed policy blocks and writes the rules "+
-		"to allow them to %s. Ctrl+C to stop.", cfg.Out)))
-
-	if n, err := k.CountPodsMatching(ctx, cfg.Label, cfg.Namespace); err != nil {
-		ui.Warn("checking for matching pods: %v", err)
-	} else if n == 0 {
-		fmt.Println(ui.Yellow(fmt.Sprintf("  Warning: no pods matching %s right now. Watching anyway.", target)))
+	src := policyindex.NewSource(k, cfg.Namespace)
+	if cfg.All {
+		scope := "every namespace"
+		if cfg.Namespace != "" {
+			scope = "namespace " + cfg.Namespace
+		}
+		fmt.Println(ui.Bold("Verifying every policy in " + scope + "."))
+		fmt.Println(ui.Dim(fmt.Sprintf("  Read-only. Logs every flow a deployed policy blocks and writes the rules "+
+			"to allow them to %s/<namespace>/<policy>.missing.yaml. Ctrl+C to stop.", cfg.Out)))
+		if err := os.MkdirAll(cfg.Out, 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", cfg.Out, err)
+		}
 	} else {
-		fmt.Println(ui.Dim(fmt.Sprintf("  %d pod(s) matching %s.", n, target)))
+		target := pipeline.DescribeTarget(cfg.Label, cfg.Namespace)
+		fmt.Println(ui.Bold(fmt.Sprintf("Verifying %s.", target)))
+		fmt.Println(ui.Dim(fmt.Sprintf("  Read-only. Logs every flow the deployed policy blocks and writes the rules "+
+			"to allow them to %s. Ctrl+C to stop.", cfg.Out)))
+		if n, err := k.CountPodsMatching(ctx, cfg.Label, cfg.Namespace); err != nil {
+			ui.Warn("checking for matching pods: %v", err)
+		} else if n == 0 {
+			fmt.Println(ui.Yellow(fmt.Sprintf("  Warning: no pods matching %s right now. Watching anyway.", target)))
+		} else {
+			fmt.Println(ui.Dim(fmt.Sprintf("  %d pod(s) matching %s.", n, target)))
+		}
 	}
 
-	w := newWatcher(cfg, newResolver(ctx, k, cfg.FqdnDump))
-	// Write the (empty) file up front, so it exists even if nothing is ever
-	// blocked and a bad path fails fast instead of on the first blocked flow.
-	if err := w.write(); err != nil {
-		return err
+	ix, warn, err := src.Load(ctx)
+	switch {
+	case err != nil && cfg.All:
+		return err // nothing to attribute flows to
+	case err != nil:
+		// Only used to tell allow-all rules apart; verify still works without.
+		ui.Warn("%v (allow-all rules in the policy may be reported as missing rules)", err)
+	case cfg.All:
+		fmt.Println(ui.Dim(fmt.Sprintf("  %d policy(ies) selecting pods.", ix.Len())))
+	}
+	if warn != "" {
+		ui.Warn("%s", warn)
 	}
 
-	follower, err := collect.StartFollow(ctx, k, cfg.Label, w.onFlow)
+	w := newWatcher(cfg, newResolver(ctx, k, cfg.FqdnDump), ix)
+	if !cfg.All {
+		// Write the (empty) file up front, so it exists even if nothing is
+		// ever blocked and a bad path fails fast instead of on the first
+		// blocked flow.
+		if err := w.single.write(); err != nil {
+			return err
+		}
+	}
+
+	follower, err := collect.StartFollowWith(ctx, k, collect.FollowOptions{
+		Label: cfg.Label,
+		CEL:   blockedCEL,
+		Keep:  mayBeBlocked,
+	}, w.onFlow)
 	if err != nil {
 		return fmt.Errorf("starting flow watch: %w", err)
 	}
 	fmt.Println(ui.Dim("  Watching..."))
 	tick := time.NewTicker(writeEvery)
 	defer tick.Stop()
+	policyTick := time.NewTicker(policyRefreshEvery)
+	defer policyTick.Stop()
+	lastLoad := time.Now()
+	reload := func() {
+		lastLoad = time.Now()
+		ix, warn, err := src.Load(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				ui.Warn("re-listing policies: %v", err)
+			}
+			return
+		}
+		if warn != "" {
+			ui.Warn("%s", warn)
+		}
+		if ix != nil {
+			w.setIndex(ix)
+		}
+	}
 	for ctx.Err() == nil {
 		select {
 		case <-tick.C:
 			w.flush()
+		case <-policyTick.C:
+			reload()
+		case <-w.reload:
+			if time.Since(lastLoad) >= policyRefreshMin {
+				reload()
+			}
 		case <-ctx.Done():
 		}
 	}
 	follower.Wait()
 
 	w.flush()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s), %d missing rule(s) in %s.",
-		w.blocked, w.count, cfg.Out)))
+	w.summary()
 	return nil
 }
 
@@ -104,6 +185,7 @@ func Run(ctx context.Context, k *kube.Client, cfg Config) error {
 // Cilium actually dropped it for lack of an allow rule (enforcing policy), or
 // it would under enforcement (policy_match_type 4 on a non-enforcing policy).
 // Drops from explicit deny rules (POLICY_DENY) are intended and not reported.
+// policy_match_type 4 also covers allow-all rules; classify rules those out.
 func blocked(f *hubble.Flow) bool {
 	if f.PolicyMatchType == 4 {
 		return true
@@ -111,7 +193,15 @@ func blocked(f *hubble.Flow) bool {
 	return f.Verdict == "DROPPED" && f.DropReasonDesc == "POLICY_DENIED"
 }
 
-// peerKey identifies one rule in the output file: a direction plus a peer.
+// mayBeBlocked is a cheap pre-check on a raw Hubble JSON line, before it's
+// parsed: only lines that could satisfy blocked pass. Hubble emits compact
+// JSON and policy_match_type is a single digit.
+func mayBeBlocked(line []byte) bool {
+	return bytes.Contains(line, []byte(`"policy_match_type":4`)) ||
+		bytes.Contains(line, []byte(`"POLICY_DENIED"`))
+}
+
+// peerKey identifies one rule in an output file: a direction plus a peer.
 type peerKey struct {
 	dir   string // "egress" | "ingress"
 	kind  string // "fqdn" | "endpoint" | "entity" | "cidr"
@@ -125,23 +215,59 @@ type portKey struct {
 	proto string
 }
 
-// watcher turns blocked flows into log lines and a deduplicated rule set.
+// fileKey identifies one output file in --all mode.
+type fileKey struct {
+	ref          policyindex.Ref
+	unattributed bool // ref.Namespace/ref.Name are then the pods' namespace/app
+}
+
+// ruleSet is the deduplicated rules of one output file.
+type ruleSet struct {
+	path   string
+	name   string              // short name for log lines ("ns/policy")
+	title  string              // what the rules are missing from, for the header
+	note   string              // extra header line, or ""
+	others map[string]struct{} // other policies the rules could go to instead
+	rules  map[peerKey]map[portKey]struct{}
+	n      int // (peer, port) entries in rules
+	dirty  bool
+}
+
+func newRuleSet(path, name, title, note string) *ruleSet {
+	return &ruleSet{path: path, name: name, title: title, note: note,
+		others: map[string]struct{}{}, rules: map[peerKey]map[portKey]struct{}{}}
+}
+
+// watcher turns blocked flows into log lines and deduplicated rule sets.
 type watcher struct {
 	cfg     Config
 	res     *resolver
 	mu      sync.Mutex // onFlow is called concurrently, one goroutine per Cilium pod
-	rules   map[peerKey]map[portKey]struct{}
-	count   int // total (peer, port) entries across rules
+	ix      *policyindex.Index
+	single  *ruleSet // label mode's only file
+	sets    map[fileKey]*ruleSet
+	count   int // total (peer, port) entries across all sets
 	blocked int
 	capHit  bool
-	dirty   bool // rules changed since the last write
+	reload  chan struct{} // asks Run to re-list policies (non-blocking send)
 }
 
-func newWatcher(cfg Config, res *resolver) *watcher {
-	return &watcher{cfg: cfg, res: res, rules: map[peerKey]map[portKey]struct{}{}}
+func newWatcher(cfg Config, res *resolver, ix *policyindex.Index) *watcher {
+	w := &watcher{cfg: cfg, res: res, ix: ix, sets: map[fileKey]*ruleSet{}, reload: make(chan struct{}, 1)}
+	if !cfg.All {
+		w.single = newRuleSet(cfg.Out, "",
+			"the CiliumNetworkPolicy for "+pipeline.DescribeTarget(cfg.Label, cfg.Namespace), "")
+	}
+	return w
 }
 
-// onFlow is the collect.StartFollow callback. Nothing from the flow is kept
+func (w *watcher) setIndex(ix *policyindex.Index) {
+	w.mu.Lock()
+	w.ix = ix
+	w.mu.Unlock()
+}
+
+// onFlow is the collect follow callback. Nothing from the flow is kept
 // beyond the (peer, port) key it maps to.
 func (w *watcher) onFlow(f *hubble.Flow) {
 	if f == nil || f.IsReply || f.Type == "SOCK" || !blocked(f) {
@@ -150,35 +276,67 @@ func (w *watcher) onFlow(f *hubble.Flow) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	pk, port, ok := w.classify(f)
+	rs, pk, port, ok := w.classify(f)
 	if !ok {
-		return // not our pods' policy (e.g. the peer's own egress), or no L4 info
+		return // not a policy we check (e.g. the peer's own egress), allowed by an allow-all rule, or no L4 info
 	}
 	w.blocked++
-	isNew := w.add(pk, port)
-	fmt.Println(logLine(f, pk, port, isNew))
-	if isNew {
-		w.dirty = true
+	isNew := w.add(rs, pk, port)
+	prefix := ""
+	if w.cfg.All {
+		prefix = "[" + rs.name + "] "
 	}
+	fmt.Println(logLine(f, pk, port, isNew, prefix))
 }
 
-// flush rewrites the rules file if it changed since the last write.
+// flush rewrites the files whose rules changed since their last write.
 func (w *watcher) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.dirty {
+	for _, rs := range w.allSets() {
+		if !rs.dirty {
+			continue
+		}
+		if err := rs.write(); err != nil {
+			ui.Warn("%v", err)
+			continue
+		}
+		rs.dirty = false
+	}
+}
+
+// allSets returns every rule set, sorted by path.
+func (w *watcher) allSets() []*ruleSet {
+	if w.single != nil {
+		return []*ruleSet{w.single}
+	}
+	out := make([]*ruleSet, 0, len(w.sets))
+	for _, rs := range w.sets {
+		out = append(out, rs)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+func (w *watcher) summary() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.cfg.All {
+		fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s), %d missing rule(s) in %s.",
+			w.blocked, w.count, w.cfg.Out)))
 		return
 	}
-	if err := w.write(); err != nil {
-		ui.Warn("%v", err)
-		return
+	sets := w.allSets()
+	fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s), %d missing rule(s) in %d file(s):",
+		w.blocked, w.count, len(sets))))
+	for _, rs := range sets {
+		fmt.Printf("  %4d  %s\n", rs.n, rs.path)
 	}
-	w.dirty = false
 }
 
 // add records a (peer, port) entry and reports whether it was new.
-func (w *watcher) add(pk peerKey, port portKey) bool {
-	ports := w.rules[pk]
+func (w *watcher) add(rs *ruleSet, pk peerKey, port portKey) bool {
+	ports := rs.rules[pk]
 	if _, seen := ports[port]; seen {
 		return false
 	}
@@ -191,56 +349,159 @@ func (w *watcher) add(pk peerKey, port portKey) bool {
 	}
 	if ports == nil {
 		ports = map[portKey]struct{}{}
-		w.rules[pk] = ports
+		rs.rules[pk] = ports
 	}
 	ports[port] = struct{}{}
+	rs.n++
+	rs.dirty = true
 	w.count++
 	return true
 }
 
-// classify maps a blocked flow to the rule our target's policy is missing.
-// The flow must be enforced at our pod: its egress when our pod is the
-// source, its ingress when our pod is the destination.
-func (w *watcher) classify(f *hubble.Flow) (peerKey, portKey, bool) {
+// classify maps a blocked flow to the rule set it belongs to and the rule
+// it's missing. The flow must be enforced at a selected pod: its egress when
+// that pod is the source, its ingress when it's the destination.
+func (w *watcher) classify(f *hubble.Flow) (*ruleSet, peerKey, portKey, bool) {
 	port, proto := f.Port()
 	if proto == "" {
-		return peerKey{}, portKey{}, false
-	}
-	srcOurs := collect.IsOurs(f.Source, w.cfg.Label, w.cfg.Namespace)
-	dstOurs := collect.IsOurs(f.Destination, w.cfg.Label, w.cfg.Namespace)
-
-	var dir string
-	switch f.TrafficDirection {
-	case "EGRESS":
-		if srcOurs {
-			dir = "egress"
-		}
-	case "INGRESS":
-		if dstOurs {
-			dir = "ingress"
-		}
-	default:
-		if srcOurs {
-			dir = "egress"
-		} else if dstOurs {
-			dir = "ingress"
-		}
+		return nil, peerKey{}, portKey{}, false
 	}
 
-	var pk peerKey
-	switch dir {
-	case "egress":
-		pk = w.peer(f.Destination, f.DstIP(), f.DestinationNames)
-	case "ingress":
-		pk = w.peer(f.Source, f.SrcIP(), nil)
-	default:
-		return peerKey{}, portKey{}, false
+	var (
+		dir      policyindex.Dir
+		ep, peer hubble.Endpoint
+		peerIP   string
+		names    []string
+	)
+	if w.cfg.All {
+		switch f.TrafficDirection {
+		case "EGRESS":
+			dir, ep, peer, peerIP, names = policyindex.Egress, f.Source, f.Destination, f.DstIP(), f.DestinationNames
+		case "INGRESS":
+			dir, ep, peer, peerIP = policyindex.Ingress, f.Destination, f.Source, f.SrcIP()
+		default:
+			return nil, peerKey{}, portKey{}, false
+		}
+		if isReserved(ep) {
+			return nil, peerKey{}, portKey{}, false // host/world policies aren't pod policies
+		}
+		if w.cfg.Namespace != "" && namespaceOf(ep) != w.cfg.Namespace {
+			return nil, peerKey{}, portKey{}, false
+		}
+	} else {
+		srcOurs := collect.IsOurs(f.Source, w.cfg.Label, w.cfg.Namespace)
+		dstOurs := collect.IsOurs(f.Destination, w.cfg.Label, w.cfg.Namespace)
+		egress, ingress := false, false
+		switch f.TrafficDirection {
+		case "EGRESS":
+			egress = srcOurs
+		case "INGRESS":
+			ingress = dstOurs
+		default:
+			egress = srcOurs
+			ingress = !srcOurs && dstOurs
+		}
+		switch {
+		case egress:
+			dir, ep, peer, peerIP, names = policyindex.Egress, f.Source, f.Destination, f.DstIP(), f.DestinationNames
+		case ingress:
+			dir, ep, peer, peerIP = policyindex.Ingress, f.Destination, f.Source, f.SrcIP()
+		default:
+			return nil, peerKey{}, portKey{}, false
+		}
 	}
+
+	var m policyindex.Match
+	if w.ix != nil {
+		m = w.ix.Match(ep, dir)
+		if f.PolicyMatchType == 4 && m.AllowAll {
+			return nil, peerKey{}, portKey{}, false // matched an allow-all rule, not missing one
+		}
+	}
+
+	pk := w.peer(peer, peerIP, names)
 	if pk.value == "" {
-		return peerKey{}, portKey{}, false
+		return nil, peerKey{}, portKey{}, false
 	}
-	pk.dir = dir
-	return pk, portKey{port: port, proto: proto}, true
+	pk.dir = dir.String()
+
+	rs := w.single
+	if w.cfg.All {
+		rs = w.setFor(m, ep)
+	}
+	return rs, pk, portKey{port: port, proto: proto}, true
+}
+
+// setFor returns (creating if needed) the rule set a blocked flow at ep goes
+// to: the policy policyindex.Pick chooses, or, when no visible policy selects
+// ep, a per-app "unattributed" file (and a policy re-list is requested, in
+// case one was created since the last).
+func (w *watcher) setFor(m policyindex.Match, ep hubble.Endpoint) *ruleSet {
+	primary, others := policyindex.Pick(m, ep)
+	if primary == nil {
+		ns := namespaceOf(ep)
+		name := podName(ep)
+		key := fileKey{ref: policyindex.Ref{Namespace: ns, Name: name}, unattributed: true}
+		rs := w.sets[key]
+		if rs == nil {
+			rs = newRuleSet(filepath.Join(w.cfg.Out, "_unattributed", ns, name+".missing.yaml"),
+				"unattributed "+ns+"/"+name, "the policy for '"+name+"' pods in "+ns,
+				"No CiliumNetworkPolicy cnpgen can see selects these pods (a Kubernetes NetworkPolicy?).")
+			w.sets[key] = rs
+		}
+		select {
+		case w.reload <- struct{}{}:
+		default:
+		}
+		return rs
+	}
+	key := fileKey{ref: primary.Ref}
+	rs := w.sets[key]
+	if rs == nil {
+		dir := primary.Ref.Namespace
+		kind := "CiliumNetworkPolicy"
+		if primary.Ref.Clusterwide() {
+			dir = "_clusterwide"
+			kind = "CiliumClusterwideNetworkPolicy"
+		}
+		rs = newRuleSet(filepath.Join(w.cfg.Out, dir, primary.Ref.Name+".missing.yaml"),
+			primary.Ref.String(), kind+" "+primary.Ref.String(), "")
+		w.sets[key] = rs
+	}
+	for _, o := range others {
+		if _, seen := rs.others[o.Ref.String()]; !seen {
+			rs.others[o.Ref.String()] = struct{}{}
+			rs.dirty = true
+		}
+	}
+	return rs
+}
+
+func namespaceOf(ep hubble.Endpoint) string {
+	if ep.Namespace != "" {
+		return ep.Namespace
+	}
+	return labels.GetNamespace(ep.Labels)
+}
+
+func isReserved(ep hubble.Endpoint) bool {
+	for _, l := range ep.Labels {
+		if strings.HasPrefix(l, "reserved:") {
+			return true
+		}
+	}
+	return false
+}
+
+// podName names pods no policy selects: their app label, else the pod name.
+func podName(ep hubble.Endpoint) string {
+	if app := labels.GetApp(ep.Labels); app != "" {
+		return labels.AppToPolicyName(app)
+	}
+	if ep.PodName != "" {
+		return ep.PodName
+	}
+	return "unknown"
 }
 
 // peer picks the best identity for the other side of a flow: a pod label
@@ -250,11 +511,7 @@ func (w *watcher) peer(ep hubble.Endpoint, ip string, names []string) peerKey {
 	app := labels.GetApp(ep.Labels)
 	switch {
 	case app != "" && !strings.HasPrefix(app, "reserved:"):
-		ns := ep.Namespace
-		if ns == "" {
-			ns = labels.GetNamespace(ep.Labels)
-		}
-		return peerKey{kind: "endpoint", value: app, ns: ns}
+		return peerKey{kind: "endpoint", value: app, ns: namespaceOf(ep)}
 	case app != "" && app != "reserved:world":
 		return peerKey{kind: "entity", value: strings.TrimPrefix(app, "reserved:")}
 	}
@@ -276,7 +533,7 @@ func (w *watcher) peer(ep hubble.Endpoint, ip string, names []string) peerKey {
 }
 
 // logLine renders one blocked flow.
-func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool) string {
+func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix string) string {
 	ts := time.Now()
 	if t, err := time.Parse(time.RFC3339Nano, f.Time); err == nil {
 		ts = t.Local()
@@ -289,8 +546,8 @@ func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool) string {
 	case pk.dir == "ingress" && pk.kind == "fqdn":
 		src = pk.value + " (" + f.SrcIP() + ")"
 	}
-	line := fmt.Sprintf("%s  BLOCKED %-7s  %s -> %s  %d/%s",
-		ts.Format("15:04:05"), pk.dir, src, dst, port.port, port.proto)
+	line := fmt.Sprintf("%s  BLOCKED %-7s  %s%s -> %s  %d/%s",
+		ts.Format("15:04:05"), pk.dir, prefix, src, dst, port.port, port.proto)
 	if isNew {
 		return ui.Yellow(line + "  [new rule]")
 	}
@@ -308,11 +565,7 @@ func describe(ep hubble.Endpoint, ip string) string {
 		return ip
 	}
 	name := labels.AppToPolicyName(app)
-	ns := ep.Namespace
-	if ns == "" {
-		ns = labels.GetNamespace(ep.Labels)
-	}
-	if ns != "" {
+	if ns := namespaceOf(ep); ns != "" {
 		name += "." + ns
 	}
 	return name
@@ -323,9 +576,9 @@ func describe(ep hubble.Endpoint, ip string) string {
 // only changes when the set does. Emitted by hand rather than through a YAML
 // library: the shape is fixed, and a library's reflection-based emitter
 // allocates tens of MB per write once the set gets large.
-func (w *watcher) render() []byte {
-	keys := make([]peerKey, 0, len(w.rules))
-	for pk := range w.rules {
+func (rs *ruleSet) render() []byte {
+	keys := make([]peerKey, 0, len(rs.rules))
+	for pk := range rs.rules {
 		keys = append(keys, pk)
 	}
 	sort.Slice(keys, func(i, j int) bool {
@@ -343,9 +596,20 @@ func (w *watcher) render() []byte {
 	})
 
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "# Rules missing from the CiliumNetworkPolicy for %s.\n"+
-		"# Add each list to the same list in the policy's spec. Written by cnpgen verify.\n",
-		pipeline.DescribeTarget(w.cfg.Label, w.cfg.Namespace))
+	fmt.Fprintf(&b, "# Rules missing from %s.\n"+
+		"# Add each list to the same list in the policy's spec. Written by cnpgen verify.\n", rs.title)
+	if rs.note != "" {
+		fmt.Fprintf(&b, "# %s\n", rs.note)
+	}
+	if len(rs.others) > 0 {
+		others := make([]string, 0, len(rs.others))
+		for o := range rs.others {
+			others = append(others, o)
+		}
+		sort.Strings(others)
+		fmt.Fprintf(&b, "# These pods are also selected by %s: the rules can go there instead.\n",
+			strings.Join(others, ", "))
+	}
 	if len(keys) == 0 {
 		b.WriteString("# Nothing blocked so far.\n")
 		return b.Bytes()
@@ -356,7 +620,7 @@ func (w *watcher) render() []byte {
 			dir = pk.dir
 			b.WriteString(dir + ":\n")
 		}
-		writeRule(&b, pk, w.rules[pk])
+		writeRule(&b, pk, rs.rules[pk])
 	}
 	return b.Bytes()
 }
@@ -431,27 +695,31 @@ func writeRule(b *bytes.Buffer, pk peerKey, ports map[portKey]struct{}) {
 	}
 }
 
-// write atomically replaces the output file with the current rule set. The
-// caller holds w.mu, or owns w exclusively.
-func (w *watcher) write() error {
-	data := w.render()
-	dir := filepath.Dir(w.cfg.Out)
+// write atomically replaces the set's file with its current rules, creating
+// the parent directory if needed. The caller holds the watcher's mu, or owns
+// the set exclusively.
+func (rs *ruleSet) write() error {
+	data := rs.render()
+	dir := filepath.Dir(rs.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("writing %s: %w", rs.path, err)
+	}
 	tmp, err := os.CreateTemp(dir, ".cnpgen-verify-*")
 	if err != nil {
-		return fmt.Errorf("writing %s: %w", w.cfg.Out, err)
+		return fmt.Errorf("writing %s: %w", rs.path, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
-		return fmt.Errorf("writing %s: %w", w.cfg.Out, err)
+		return fmt.Errorf("writing %s: %w", rs.path, err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmp.Name())
-		return fmt.Errorf("writing %s: %w", w.cfg.Out, err)
+		return fmt.Errorf("writing %s: %w", rs.path, err)
 	}
-	if err := os.Rename(tmp.Name(), w.cfg.Out); err != nil {
+	if err := os.Rename(tmp.Name(), rs.path); err != nil {
 		os.Remove(tmp.Name())
-		return fmt.Errorf("writing %s: %w", w.cfg.Out, err)
+		return fmt.Errorf("writing %s: %w", rs.path, err)
 	}
 	return nil
 }

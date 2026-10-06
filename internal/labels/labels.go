@@ -41,6 +41,25 @@ func GetApp(lbls []string) string {
 	return ""
 }
 
+// HasLabel reports whether lbls contains the exact "key=value" pair given by
+// filter (e.g. "app.kubernetes.io/name=foo"), with or without Cilium's "k8s:"
+// prefix.
+func HasLabel(lbls []string, filter string) bool {
+	key, val, ok := strings.Cut(filter, "=")
+	if !ok {
+		return false
+	}
+	key, val = strings.TrimSpace(key), strings.TrimSpace(val)
+	want1 := key + "=" + val
+	want2 := "k8s:" + key + "=" + val
+	for _, l := range lbls {
+		if l == want1 || l == want2 {
+			return true
+		}
+	}
+	return false
+}
+
 // GetNamespace returns the pod namespace from a list of Cilium endpoint
 // labels, or "". Hubble flow endpoints normally carry a top-level "namespace"
 // field, but it is sometimes absent even though the labels have it (as

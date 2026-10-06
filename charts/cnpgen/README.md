@@ -5,14 +5,16 @@
 Run cnpgen in your cluster to generate a Cilium network policy from observed traffic.
 
 Runs [cnpgen](https://github.com/kwistof/cnpgen) as a `Deployment` in the
-cluster, in one of two modes:
+cluster, in one of three modes:
 
 - `audit` (default): builds a policy from the traffic it sees and deploys it in
   non-enforcing mode. It never blocks traffic.
 - `verify`: read-only. Logs every flow the policy already deployed blocks, and
   writes the rules to add.
+- `verify-all`: `verify` for every policy at once, with one file of rules to
+  add per policy.
 
-Both run until you uninstall.
+All run until you uninstall.
 
 ## Build a policy (audit)
 
@@ -59,6 +61,22 @@ POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath
 kubectl -n cnpgen cp "$POD":/out/missing-rules.yaml ./missing-rules.yaml
 ```
 
+## Check every policy at once (verify-all)
+
+```bash
+helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
+  --set audit.mode=verify-all
+```
+
+Add `--set target.namespace=my-namespace` to only check the policies of one
+namespace. Get the rules to add, one `<namespace>/<policy>.missing.yaml` per
+policy:
+
+```bash
+POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath='{.items[0].metadata.name}')
+kubectl -n cnpgen cp "$POD":/out ./missing-rules
+```
+
 ## Uninstall
 
 ```bash
@@ -66,7 +84,7 @@ helm uninstall cnpgen -n cnpgen
 ```
 
 In `audit` mode, this also deletes the policy cnpgen deployed. In `verify`
-mode, nothing on the cluster is touched.
+and `verify-all` modes, nothing on the cluster is touched.
 
 ## Values
 
@@ -76,7 +94,7 @@ mode, nothing on the cluster is touched.
 | audit.dryRun | bool | `false` | Preview the policy without deploying it. `audit` mode only. |
 | audit.duration | int | `120` | Seconds to watch per round. `audit` mode only. |
 | audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`. |
-| audit.mode | string | `"audit"` | `audit` builds a policy from observed traffic. `verify` is read-only: it logs every flow the policy already deployed in target.namespace blocks, and writes the rules to add to `/out/missing-rules.yaml`. |
+| audit.mode | string | `"audit"` | `audit` builds a policy from observed traffic. `verify` is read-only: it logs every flow the policy already deployed in target.namespace blocks, and writes the rules to add to `/out/missing-rules.yaml`. `verify-all` does the same for every policy at once (leave target.label empty), writing one `/out/<namespace>/<policy>.missing.yaml` per policy missing rules. |
 | ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release (about 15 MB in each agent pod). Install one release per app to audit several apps at once; they can share a namespace. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |
@@ -86,8 +104,8 @@ mode, nothing on the cluster is touched.
 | resources | object | `{}` | Pod resource requests/limits. |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount for the Job. |
 | serviceAccount.name | string | `""` | ServiceAccount name. Empty uses the chart's fullname. |
-| target.label | string | `""` | Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required.** |
-| target.namespace | string | `""` | Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required.** |
+| target.label | string | `""` | Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required**, except with `audit.mode: verify-all`, where it must be empty. |
+| target.namespace | string | `""` | Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required**, except with `audit.mode: verify-all`, where it optionally limits the check to one namespace. |
 | tolerations | list | `[]` | Pod tolerations. |
 
 ## Maintainers

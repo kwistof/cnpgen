@@ -103,8 +103,39 @@ Read-only. It watches the pods against the policy already deployed (any policy, 
   Copy each entry into the `egress`/`ingress` list of your policy.
 
 If no policy selects the pods, nothing is blocked, so nothing is reported.
+Traffic a rule allowing everything (`toEntities: [all]` with no ports) lets
+through isn't reported either.
 
 When running several `verify` at once, give each its own `-o` file.
+
+### Every policy at once: `cnpgen verify --all`
+
+```bash
+cnpgen verify --all -o missing-rules/              # every namespace
+cnpgen verify --all -n my-namespace -o missing-rules/
+```
+
+Same as `verify`, but for every CiliumNetworkPolicy (and
+CiliumClusterwideNetworkPolicy) in the cluster, in one process with one
+`hubble observe` per Cilium agent, however many policies there are. Each
+blocked flow is matched to the policy selecting the pod it's enforced at
+(egress at the source, ingress at the destination) and logged with it:
+
+```
+10:43:20  BLOCKED egress   [webshop/frontend] frontend.webshop -> example.com (104.20.23.154)  443/TCP  [new rule]
+```
+
+and the rules to add go to one file per policy, `missing-rules/<namespace>/<policy>.missing.yaml`
+(`_clusterwide/<policy>.missing.yaml` for clusterwide policies). When several
+policies select the same pods, the rules go to the cnpgen policy generated for
+them if there is one, else the first by name; the file names the others. Pods
+blocked without any visible policy selecting them land in
+`_unattributed/<namespace>/<app>.missing.yaml`. Files are only written for
+policies missing rules, and never deleted: start from an empty `-o` directory.
+
+Only blocked flows leave the Cilium agents (Hubble filters them with
+`--cel-expression`). On a Hubble too old for that, cnpgen filters them itself,
+which costs it noticeably more CPU on a busy node.
 
 ---
 

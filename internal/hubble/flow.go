@@ -8,8 +8,10 @@ import "encoding/json"
 
 // Endpoint is a flow source or destination.
 type Endpoint struct {
+	Identity  uint32   `json:"identity"` // Cilium security identity, 0 if unknown
 	Namespace string   `json:"namespace"`
 	Labels    []string `json:"labels"`
+	PodName   string   `json:"pod_name"`
 }
 
 // L4 carries the transport-layer port for TCP or UDP.

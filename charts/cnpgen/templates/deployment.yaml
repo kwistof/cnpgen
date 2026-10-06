@@ -1,14 +1,20 @@
+{{- if eq .Values.audit.mode "verify-all" }}
+{{- if .Values.target.label }}
+{{- fail "target.label must be empty with audit.mode=verify-all: it checks every policy (target.namespace, if set, limits it to one namespace)" }}
+{{- end }}
+{{- else }}
 {{- if not .Values.target.label }}
 {{- fail "target.label is required, e.g. --set target.label=app.kubernetes.io/name=my-app" }}
 {{- end }}
 {{- if not .Values.target.namespace }}
 {{- fail "target.namespace is required, e.g. --set target.namespace=my-namespace" }}
 {{- end }}
+{{- end }}
 {{- if gt (int .Values.audit.settle) 0 }}
 {{- fail "audit.settle isn't supported in the chart: it runs cnpgen as a long-lived Deployment, and a settling run would exit and be restarted in a loop. Leave audit.settle at 0 here and pull the policy files with `kubectl cp`; use the cnpgen CLI directly if you want a one-shot --settle run." }}
 {{- end }}
-{{- if not (has .Values.audit.mode (list "audit" "verify")) }}
-{{- fail (printf "audit.mode must be \"audit\" or \"verify\", got %q" .Values.audit.mode) }}
+{{- if not (has .Values.audit.mode (list "audit" "verify" "verify-all")) }}
+{{- fail (printf "audit.mode must be \"audit\", \"verify\" or \"verify-all\", got %q" .Values.audit.mode) }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -43,13 +49,25 @@ spec:
             - name: FORCE_COLOR
               value: "1"
           args:
+            {{- if eq .Values.audit.mode "verify-all" }}
+            - verify
+            - --all
+            {{- if .Values.target.namespace }}
+            - -n
+            - {{ .Values.target.namespace | quote }}
+            {{- end }}
+            - -o
+            - /out
+            {{- else }}
             - {{ .Values.audit.mode }}
             - -l
             - {{ .Values.target.label | quote }}
             - -n
             - {{ .Values.target.namespace | quote }}
             - -o
-            {{- if eq .Values.audit.mode "verify" }}
+            {{- end }}
+            {{- if eq .Values.audit.mode "verify-all" }}
+            {{- else if eq .Values.audit.mode "verify" }}
             - /out/missing-rules.yaml
             {{- else }}
             - /out
@@ -65,7 +83,8 @@ spec:
             - {{ . | quote }}
             {{- end }}
           volumeMounts:
-            # Generated policy files (audit) or missing-rules.yaml (verify)
+            # Generated policy files (audit), missing-rules.yaml (verify) or
+            # one <namespace>/<policy>.missing.yaml per policy (verify-all)
             # land here; pull them with
             #   kubectl -n {{ .Release.Namespace }} cp <pod>:/out ./netpol-out
             - name: out

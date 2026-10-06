@@ -1,4 +1,16 @@
-{{- if eq .Values.audit.mode "verify" }}
+{{- if eq .Values.audit.mode "verify-all" }}
+cnpgen is now checking every policy in {{ if .Values.target.namespace }}"{{ .Values.target.namespace }}"{{ else }}every namespace{{ end }} (read-only).
+
+See every blocked flow, prefixed with the policy it's missing from:
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "cnpgen.fullname" . }}
+
+Get the rules to add, one file per policy (<namespace>/<policy>.missing.yaml):
+  POD=$(kubectl -n {{ .Release.Namespace }} get pod -l app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n {{ .Release.Namespace }} cp "$POD":/out ./missing-rules
+
+Stop:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- else if eq .Values.audit.mode "verify" }}
 cnpgen is now checking the policy for {{ .Values.target.label }} in "{{ .Values.target.namespace }}" (read-only).
 
 See every blocked flow:

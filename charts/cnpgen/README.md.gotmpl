@@ -7,14 +7,16 @@
 {{ template "chart.description" . }}
 
 Runs [cnpgen](https://github.com/kwistof/cnpgen) as a `Deployment` in the
-cluster, in one of two modes:
+cluster, in one of three modes:
 
 - `audit` (default): builds a policy from the traffic it sees and deploys it in
   non-enforcing mode. It never blocks traffic.
 - `verify`: read-only. Logs every flow the policy already deployed blocks, and
   writes the rules to add.
+- `verify-all`: `verify` for every policy at once, with one file of rules to
+  add per policy.
 
-Both run until you uninstall.
+All run until you uninstall.
 
 ## Build a policy (audit)
 
@@ -61,6 +63,22 @@ POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath
 kubectl -n cnpgen cp "$POD":/out/missing-rules.yaml ./missing-rules.yaml
 ```
 
+## Check every policy at once (verify-all)
+
+```bash
+helm install cnpgen oci://ghcr.io/kwistof/charts/cnpgen -n cnpgen --create-namespace \
+  --set audit.mode=verify-all
+```
+
+Add `--set target.namespace=my-namespace` to only check the policies of one
+namespace. Get the rules to add, one `<namespace>/<policy>.missing.yaml` per
+policy:
+
+```bash
+POD=$(kubectl -n cnpgen get pod -l app.kubernetes.io/instance=cnpgen -o jsonpath='{.items[0].metadata.name}')
+kubectl -n cnpgen cp "$POD":/out ./missing-rules
+```
+
 ## Uninstall
 
 ```bash
@@ -68,7 +86,7 @@ helm uninstall cnpgen -n cnpgen
 ```
 
 In `audit` mode, this also deletes the policy cnpgen deployed. In `verify`
-mode, nothing on the cluster is touched.
+and `verify-all` modes, nothing on the cluster is touched.
 
 {{ template "chart.valuesSection" . }}
 

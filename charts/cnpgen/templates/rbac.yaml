@@ -10,6 +10,10 @@ rules:
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Read-only: verify checks which clusterwide policies select the pods too.
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumclusterwidenetworkpolicies"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -59,6 +63,7 @@ roleRef:
   name: {{ include "cnpgen.fullname" . }}-selfscale
   apiGroup: rbac.authorization.k8s.io
 ---
+{{- if ne .Values.audit.mode "verify-all" }}
 # List pods in the watched namespace, for the upfront "does anything actually
 # match -l/-n" sanity check.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -89,6 +94,7 @@ roleRef:
   name: {{ include "cnpgen.fullname" . }}-target-pods
   apiGroup: rbac.authorization.k8s.io
 ---
+{{- end }}
 # List and exec into the Cilium agent pods (to run hubble / cilium fqdn cache).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

@@ -1,13 +1,15 @@
 target:
-  # -- Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required.**
+  # -- Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required**, except with `audit.mode: verify-all`, where it must be empty.
   label: ""
-  # -- Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required.**
+  # -- Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required**, except with `audit.mode: verify-all`, where it optionally limits the check to one namespace.
   namespace: ""
 
 audit:
   # -- `audit` builds a policy from observed traffic. `verify` is read-only: it
   # logs every flow the policy already deployed in target.namespace blocks, and
-  # writes the rules to add to `/out/missing-rules.yaml`.
+  # writes the rules to add to `/out/missing-rules.yaml`. `verify-all` does the
+  # same for every policy at once (leave target.label empty), writing one
+  # `/out/<namespace>/<policy>.missing.yaml` per policy missing rules.
   mode: audit
   # -- Seconds to watch per round. `audit` mode only.
   duration: 120

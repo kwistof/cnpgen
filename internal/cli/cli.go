@@ -159,6 +159,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   cnpgen audit    -l <label> -n <namespace> [options]    watch live traffic and build a working policy
   cnpgen verify   -l <label> -n <namespace> [options]    read-only: log what the deployed policy blocks
+  cnpgen verify   --all [-n <namespace>] [options]       same, for every policy at once
   cnpgen generate -l <label> -n <namespace> --flows <f>  build policy files offline from a saved flows file
   cnpgen cleanup  -n <namespace> [-l <label>]            delete cnpgen-managed policies from a namespace
   cnpgen review   [-o <dir>]                             interactively accept/decline wildcard suggestions
@@ -296,19 +297,23 @@ func cmdVerify(argv []string) int {
 	fs.BoolVar(&g.noBanner, "no-banner", false, "suppress the banner")
 
 	var fqdnCache, out string
-	fs.StringVar(&out, "o", "missing-rules.yaml", "file to write the missing rules to")
-	fs.StringVar(&out, "out", "missing-rules.yaml", "file to write the missing rules to")
+	var all bool
+	fs.BoolVar(&all, "all", false, "check every policy at once instead of -l pods (-n then only limits which namespace)")
+	fs.StringVar(&out, "o", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
+	fs.StringVar(&out, "out", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
 	fs.StringVar(&fqdnCache, "fqdn-cache", "", "resolve destinations from this saved *-fqdn dump instead of the live cache")
 
 	fs.Usage = func() {
 		printGrouped("verify",
 			"Watch live traffic for the selected pods and log every flow the CiliumNetworkPolicy\n"+
 				"already deployed for them does NOT allow. The rules that would allow them are\n"+
-				"written to -o as they appear. Read-only: never touches the cluster. Runs until\n"+
-				"you stop it (Ctrl+C).",
-			"  cnpgen verify -l app.kubernetes.io/name=my-app -n my-namespace -o missing.yaml",
+				"written to -o as they appear. With --all, every policy is checked at once and each\n"+
+				"one missing rules gets its own file under -o. Read-only: never touches the cluster.\n"+
+				"Runs until you stop it (Ctrl+C).",
+			"  cnpgen verify -l app.kubernetes.io/name=my-app -n my-namespace -o missing.yaml\n"+
+				"  cnpgen verify --all -o missing-rules/",
 			fs, [][2]any{
-				{"Target", []string{"l", "n"}},
+				{"Target", []string{"l", "n", "all"}},
 				{"Output", []string{"o"}},
 				{"Tuning", []string{"fqdn-cache"}},
 				{"Cluster", []string{"context", "kubeconfig", "cilium-namespace", "cilium-selector", "nodes"}},
@@ -321,7 +326,19 @@ func cmdVerify(argv []string) int {
 	ui.Debug = g.debug
 	showBanner(&g)
 
-	if code, ok := requireTarget(&g); !ok {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if all {
+		if g.label != "" {
+			return fail("-l and --all can't be combined: --all checks every policy, -l one set of pods")
+		}
+		if !set["n"] && !set["namespace"] {
+			g.namespace = "" // every namespace
+		}
+		if !set["o"] && !set["out"] {
+			out = "missing-rules"
+		}
+	} else if code, ok := requireTarget(&g); !ok {
 		return code
 	}
 
@@ -337,6 +354,7 @@ func cmdVerify(argv []string) int {
 	if err := verifycmd.Run(ctx, k, verifycmd.Config{
 		Label:     g.label,
 		Namespace: g.namespace,
+		All:       all,
 		Out:       out,
 		FqdnDump:  fqdnCache,
 	}); err != nil {
