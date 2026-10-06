@@ -24,6 +24,11 @@ func TestAgentRunning(t *testing.T) {
 		{"waiting", corev1.Pod{Status: status(ciliumContainer, waiting)}, false},
 		{"no statuses yet", corev1.Pod{}, false},
 		{"only another container running", corev1.Pod{Status: status("other", running)}, false},
+		{"not ready (node unreachable)", corev1.Pod{Status: func() corev1.PodStatus {
+			st := status(ciliumContainer, running)
+			st.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+			return st
+		}()}, false},
 		{"terminating", corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}, Status: status(ciliumContainer, running)}, false},
 	}
 	for _, c := range cases {

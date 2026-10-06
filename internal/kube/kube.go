@@ -218,7 +218,7 @@ func (c *Client) CiliumPods(ctx context.Context) ([]Pod, error) {
 		// A pod whose agent isn't running (node joining, draining or being
 		// upgraded) can't be exec'd into; trying only produces warnings.
 		if !agentRunning(&p) {
-			ui.Log("Skipping %s (%s): %s container not running", p.Name, node, ciliumContainer)
+			ui.Log("Skipping %s (%s): %s container not running or pod not ready", p.Name, node, ciliumContainer)
 			continue
 		}
 		pods = append(pods, Pod{Name: p.Name, Node: node})
@@ -227,10 +227,18 @@ func (c *Client) CiliumPods(ctx context.Context) ([]Pod, error) {
 	return pods, nil
 }
 
-// agentRunning reports whether p's Cilium agent container is running.
+// agentRunning reports whether p's Cilium agent container is running, and
+// the pod isn't marked not Ready. A node that stops reporting (shut down,
+// being removed by a scale-down) gets its pods marked not Ready; exec'ing
+// into one only fails, since the API server can no longer reach its node.
 func agentRunning(p *corev1.Pod) bool {
 	if p.DeletionTimestamp != nil {
 		return false
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady && c.Status == corev1.ConditionFalse {
+			return false
+		}
 	}
 	for _, cs := range p.Status.ContainerStatuses {
 		if cs.Name == ciliumContainer {

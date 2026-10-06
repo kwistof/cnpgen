@@ -10,10 +10,8 @@ package collect
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -235,124 +233,6 @@ func CollectLast(ctx context.Context, k *kube.Client, label string, last int, ce
 			"the same as convergence.", label)
 	}
 	return allFlows, nil
-}
-
-// Follower keeps exactly one `hubble observe --follow` exec alive per Cilium
-// pod for as long as ctx lives. Every parsed flow is pushed to onFlow as it
-// arrives; callers that need a bounded window (e.g. one audit round)
-// filter/collect from onFlow themselves rather than starting a new exec per
-// window.
-type Follower struct {
-	wg sync.WaitGroup
-}
-
-// FollowOptions narrows what a Follower streams.
-type FollowOptions struct {
-	// Label restricts the stream to flows from or to pods with this
-	// "key=value" label; "" streams every flow on the node.
-	Label string
-	// CEL is a Hubble --cel-expression applied in the agent, so filtered-out
-	// flows never cross the exec connection. If an agent's Hubble rejects
-	// it, that stream restarts without it and Keep alone does the filtering.
-	CEL string
-	// Keep, if set, is called on each raw JSON line before it's parsed;
-	// lines it rejects are dropped without allocating a Flow. It must be
-	// safe for concurrent use.
-	Keep func(line []byte) bool
-}
-
-// StartFollow starts the persistent per-pod streams for label and returns
-// immediately; call Wait to block until ctx is cancelled and every stream has
-// torn down.
-func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(*hubble.Flow)) (*Follower, error) {
-	return StartFollowWith(ctx, k, FollowOptions{Label: label}, onFlow)
-}
-
-// StartFollowWith is StartFollow with filtering options. A stream that fails
-// is reported with a warning as soon as it does, not at teardown, so a watch
-// that never saw anything can't pass for a quiet one.
-//
-// Known limitation: the remote `hubble observe --follow` process is not
-// killed at teardown and keeps running in the agent container until that
-// pod restarts. Cancelling the exec doesn't stop it (no TTY, and hubble
-// ignores its stdout going away; a TTY doesn't help either), and killing it
-// needs a binary (sh, kill, pkill) that minimal Cilium agent images, like
-// AKS's, don't ship.
-func StartFollowWith(ctx context.Context, k *kube.Client, opts FollowOptions, onFlow func(*hubble.Flow)) (*Follower, error) {
-	pods, err := k.CiliumPods(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(pods) == 0 {
-		ui.Warn("No cilium pods found.")
-		return &Follower{}, nil
-	}
-
-	f := &Follower{}
-	for _, pod := range pods {
-		f.wg.Add(1)
-		go func(pod kube.Pod) {
-			defer f.wg.Done()
-			cel := opts.CEL
-			for {
-				saw, err := followPod(ctx, k, pod, observeCmd(opts.Label, 0, true, cel), opts.Keep, onFlow)
-				if err != nil && cel != "" && !saw && ctx.Err() == nil {
-					// Most likely a Hubble too old for --cel-expression.
-					// Its first line has the cause (later ones point at a column).
-					first, _, _ := strings.Cut(err.Error(), "\n")
-					ui.Warn("hubble on %s (%s) rejected the server-side filter, filtering in cnpgen instead: %s",
-						pod.Name, pod.Node, first)
-					cel = ""
-					continue
-				}
-				if err != nil {
-					ui.Warn("flow watch stopped on %s (%s), its node's traffic is no longer watched: %s",
-						pod.Name, pod.Node, lastLine(err.Error()))
-				} else if ctx.Err() == nil {
-					ui.Warn("flow watch ended on %s (%s), its node's traffic is no longer watched",
-						pod.Name, pod.Node)
-				}
-				return
-			}
-		}(pod)
-	}
-	return f, nil
-}
-
-// followPod runs one `hubble observe --follow` exec until it ends, feeding
-// onFlow. saw reports whether it produced any output at all.
-func followPod(ctx context.Context, k *kube.Client, pod kube.Pod, argv []string, keep func([]byte) bool, onFlow func(*hubble.Flow)) (saw bool, err error) {
-	pr, pw := io.Pipe()
-	done := make(chan struct{})
-	go func() {
-		sc := bufio.NewScanner(pr)
-		sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
-		for sc.Scan() {
-			saw = true
-			line := bytes.TrimSpace(sc.Bytes())
-			if len(line) == 0 || (keep != nil && !keep(line)) {
-				continue
-			}
-			fl, perr := hubble.ParseLine(line)
-			if perr != nil || fl == nil {
-				continue
-			}
-			onFlow(fl)
-		}
-		// Keep draining so the exec never blocks on a full pipe.
-		_, _ = io.Copy(io.Discard, pr)
-		close(done)
-	}()
-	err = k.ExecStream(ctx, pod.Name, argv, pw)
-	pw.Close()
-	<-done
-	return saw, err
-}
-
-// Wait blocks until every per-pod stream has torn down (i.e. until the ctx
-// passed to StartFollow is cancelled).
-func (f *Follower) Wait() {
-	f.wg.Wait()
 }
 
 func lastLine(s string) string {
