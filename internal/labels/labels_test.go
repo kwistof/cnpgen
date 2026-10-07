@@ -15,6 +15,16 @@ func TestGetApp(t *testing.T) {
 		{[]string{"reserved:world"}, "reserved:world"},
 		{[]string{"reserved:host"}, "reserved:host"},
 		{[]string{"k8s:io.kubernetes.pod.namespace=x"}, ""},
+		// Priority follows appLabelKeys, not the order of the labels.
+		{[]string{"k8s:app=foo", "k8s:app.kubernetes.io/name=bar"}, "k8s:app.kubernetes.io/name=bar"},
+		{[]string{"k8s:io.cilium.k8s.policy.serviceaccount=sa", "k8s:k8s-app=foo"}, "k8s:k8s-app=foo"},
+		// No app label: fall back to the service account, except "default".
+		{[]string{
+			"k8s:control-plane=solr-operator",
+			"k8s:io.cilium.k8s.policy.serviceaccount=solrcloud-solr-operator",
+			"k8s:io.kubernetes.pod.namespace=solr-operator",
+		}, "k8s:io.cilium.k8s.policy.serviceaccount=solrcloud-solr-operator"},
+		{[]string{"k8s:control-plane=x", "k8s:io.cilium.k8s.policy.serviceaccount=default"}, ""},
 		{nil, ""},
 	}
 	for _, c := range cases {
@@ -46,6 +56,9 @@ func TestAppToLabelSelector(t *testing.T) {
 
 func TestAppToPolicyName(t *testing.T) {
 	if got := AppToPolicyName("k8s:app.kubernetes.io/name=hybris-front"); got != "hybris-front" {
+		t.Errorf("got %q", got)
+	}
+	if got := AppToPolicyName("k8s:io.cilium.k8s.policy.serviceaccount=solrcloud-solr-operator"); got != "solrcloud-solr-operator" {
 		t.Errorf("got %q", got)
 	}
 	if got := AppToPolicyName("reserved:world"); got != "reserved-world" {

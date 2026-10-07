@@ -6,13 +6,21 @@ package labels
 import "strings"
 
 // appLabelKeys are the label keys, in priority order, that identify the "app"
-// of an endpoint.
+// of an endpoint. The service account comes last: Cilium sets it on every pod,
+// so it names pods carrying none of the usual app labels (e.g. only
+// "control-plane=..."), which would otherwise have no identity at all.
 var appLabelKeys = []string{
 	"k8s:app.kubernetes.io/name",
 	"k8s:app",
 	"k8s:k8s-app",
 	"k8s:rsName",
+	serviceAccountKey,
 }
+
+// serviceAccountKey is the label Cilium derives from a pod's service account.
+// The "default" service account is ignored: it is shared by every pod of a
+// namespace that doesn't set one, so it identifies nothing.
+const serviceAccountKey = "k8s:io.cilium.k8s.policy.serviceaccount"
 
 // GetApp returns a canonical app identifier from a list of Cilium endpoint
 // labels, e.g. "k8s:app.kubernetes.io/name=hybris-back" for normal pods, or
@@ -20,22 +28,21 @@ var appLabelKeys = []string{
 // no recognized label is present.
 func GetApp(lbls []string) string {
 	for _, l := range lbls {
-		if !strings.Contains(l, "=") {
-			// Reserved identities look like "reserved:world" (no '=').
-			if !strings.Contains(l, ":") {
+		// Reserved identities look like "reserved:world" (no '=').
+		if key, val, ok := strings.Cut(l, ":"); ok && key == "reserved" && !strings.Contains(l, "=") {
+			return key + ":" + val
+		}
+	}
+	for _, k := range appLabelKeys {
+		for _, l := range lbls {
+			key, val, ok := strings.Cut(l, "=")
+			if !ok || key != k || val == "" {
 				continue
 			}
-			key, val, _ := strings.Cut(l, ":")
-			if key == "reserved" {
-				return key + ":" + val
+			if k == serviceAccountKey && val == "default" {
+				continue
 			}
-			continue
-		}
-		key, val, _ := strings.Cut(l, "=")
-		for _, k := range appLabelKeys {
-			if key == k {
-				return key + "=" + val
-			}
+			return key + "=" + val
 		}
 	}
 	return ""
