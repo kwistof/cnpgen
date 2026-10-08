@@ -167,10 +167,12 @@ func LoadFlowsFile(path string) ([]*hubble.Flow, error) {
 	return flows, sc.Err()
 }
 
-// observeCmd builds the `hubble observe` argv. label "" watches every pod.
-func observeCmd(label string, last int, follow bool, cel string) []string {
+// observeCmd builds the `hubble observe` argv. Hubble ORs repeated --label
+// filters, so the stream carries flows from or to pods with any of labels;
+// no labels watches every pod.
+func observeCmd(labels []string, last int, follow bool, cel string) []string {
 	cmd := []string{"hubble", "observe", "--output", "json"}
-	if label != "" {
+	for _, label := range labels {
 		cmd = append(cmd, "--label", label)
 	}
 	if cel != "" {
@@ -196,7 +198,7 @@ func CollectLast(ctx context.Context, k *kube.Client, label string, last int, ce
 		return nil, nil
 	}
 
-	argv := observeCmd(label, last, false, cel)
+	argv := observeCmd(nonEmpty(label), last, false, cel)
 
 	var (
 		mu       sync.Mutex
@@ -246,6 +248,14 @@ func CollectLast(ctx context.Context, k *kube.Client, label string, last int, ce
 			"the same as convergence.", label)
 	}
 	return allFlows, nil
+}
+
+// nonEmpty returns label as a one-element list, or nil for "" (every pod).
+func nonEmpty(label string) []string {
+	if label == "" {
+		return nil
+	}
+	return []string{label}
 }
 
 func lastLine(s string) string {

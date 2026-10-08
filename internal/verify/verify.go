@@ -67,27 +67,33 @@ func (w *Window) Snapshot() []*hubble.Flow {
 	return append([]*hubble.Flow(nil), w.collected...)
 }
 
-// Wait blocks for `duration` or until ctx is cancelled, then returns the
-// flows collected during that time (via Reset beforehand to scope it to just
-// this call). It stops early if ctx is cancelled (e.g. Ctrl+C), returning
-// ctx.Err() so the caller can stop looping.
-func (w *Window) Wait(ctx context.Context, duration time.Duration) ([]*hubble.Flow, error) {
-	w.Reset()
+// Wait clears every window, then blocks for `duration` or until ctx is
+// cancelled (e.g. Ctrl+C), so that each window then holds just the flows
+// seen meanwhile: read them with Snapshot. Several windows share one wait
+// when they're fed by the same flow feed. Returns ctx.Err() when stopped
+// early, so the caller can stop looping.
+func Wait(ctx context.Context, duration time.Duration, windows ...*Window) error {
+	for _, w := range windows {
+		w.Reset()
+	}
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 	case <-ctx.Done():
-		return w.Snapshot(), ctx.Err()
+		return ctx.Err()
 	}
-
-	collected := w.Snapshot()
-	kind := "observed"
-	if w.dropOnly {
-		kind = "would-be-dropped"
+	for _, w := range windows {
+		kind := "observed"
+		if w.dropOnly {
+			kind = "would-be-dropped"
+		}
+		w.mu.Lock()
+		n := len(w.collected)
+		w.mu.Unlock()
+		ui.Log("Window: %d %s flows in %s", n, kind, duration)
 	}
-	ui.Log("Window: %d %s flows in %s", len(collected), kind, duration)
-	return collected, nil
+	return nil
 }
 
 // DropKey identifies a distinct would-be-dropped connection.

@@ -39,3 +39,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Labels to audit: target.label then target.labels, as a JSON list
+     (read back with fromJsonArray). */}}
+{{- define "cnpgen.targetLabels" -}}
+{{- concat (compact (list .Values.target.label)) (.Values.target.labels | default list) | toJson -}}
+{{- end -}}

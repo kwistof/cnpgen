@@ -62,14 +62,15 @@ See `cnpgen audit -h` for all options (`--allow-domain`, `--known-ip`, `--allow-
 
 ### Several apps at once
 
-Run one `cnpgen audit` per app, at the same time (separate terminals, or one Helm release each). They can share a namespace and the output directory:
+Repeat `-l`, one per app:
 
 ```bash
-cnpgen audit -l app.kubernetes.io/name=frontend -n webshop
-cnpgen audit -l app.kubernetes.io/name=backend  -n webshop
+cnpgen audit -l app.kubernetes.io/name=frontend -l app.kubernetes.io/name=backend -n webshop
 ```
 
-Each run adds one `hubble observe` process in every Cilium agent pod, about 15 MB each.
+Each app gets its own policy, exactly as if audited alone (with `--settle`, each stops and is cleaned up on its own), but they all share one `hubble observe` process in every Cilium agent pod, about 15 MB. With the Helm chart, list them in `target.labels`.
+
+You can also run one `cnpgen audit` per app at the same time (separate terminals, or one Helm release each). They can share a namespace and the output directory, but each run adds its own `hubble observe` process in every Cilium agent pod.
 
 ---
 

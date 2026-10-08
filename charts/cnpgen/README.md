@@ -95,7 +95,7 @@ and `verify-all` modes, nothing on the cluster is touched.
 | audit.duration | int | `120` | Seconds to watch per round. `audit` mode only. |
 | audit.extraArgs | list | `[]` | Extra raw args passed to `cnpgen audit`/`cnpgen verify`, e.g. `["--allow-domain", "*.auth0.com"]`. |
 | audit.mode | string | `"audit"` | `audit` builds a policy from observed traffic. `verify` is read-only: it logs every flow the policy already deployed in target.namespace blocks, and writes the rules to add to `/out/missing-rules.yaml`. `verify-all` does the same for every policy at once (leave target.label empty), writing one `/out/<namespace>/<policy>.missing.yaml` per policy missing rules. |
-| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release (about 15 MB in each agent pod). Install one release per app to audit several apps at once; they can share a namespace. |
+| ciliumNamespace | string | `"kube-system"` | Namespace where the Cilium agent pods run, cnpgen execs into them. Since this chart runs `cnpgen audit` as a long-lived Deployment, expect one long-lived `hubble observe --follow` exec session per Cilium agent pod for the lifetime of this release (about 15 MB in each agent pod). To audit several apps at once, list them in target.labels (one stream for all), or install one release per app (one stream each); they can share a namespace. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/kwistof/cnpgen"` | Image repository. |
 | image.tag | string | `""` | Image tag. Defaults to the chart's `appVersion`. |
@@ -105,7 +105,8 @@ and `verify-all` modes, nothing on the cluster is touched.
 | resources | object | `{}` | Pod resource requests/limits. |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount for the Job. |
 | serviceAccount.name | string | `""` | ServiceAccount name. Empty uses the chart's fullname. |
-| target.label | string | `""` | Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required**, except with `audit.mode: verify-all`, where it must be empty. |
+| target.label | string | `""` | Label selecting which pods to watch, e.g. `app.kubernetes.io/name=my-app`. **Required** (unless `target.labels` is set), except with `audit.mode: verify-all`, where it must be empty. |
+| target.labels | list | `[]` | More labels to audit in this same release, on top of `target.label` (`audit` mode only), e.g. `["app.kubernetes.io/name=frontend", "app.kubernetes.io/name=backend"]`. Each gets its own policy, as with one release per label, but they share one `hubble observe` stream per Cilium agent instead of one each. |
 | target.namespace | string | `""` | Namespace to watch those pods in, and where the generated CiliumNetworkPolicy is written/deployed (a CNP only ever matches pods in its own namespace). **Required**, except with `audit.mode: verify-all`, where it optionally limits the check to one namespace. |
 | tolerations | list | `[]` | Pod tolerations. |
 

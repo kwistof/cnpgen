@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kwistof/cnpgen/internal/hubble"
@@ -140,5 +141,19 @@ func TestExtractNamesOurPodsByTheLabel(t *testing.T) {
 	key := model.AppConn{Peer: ours, Port: 8080, Proto: "TCP"}
 	if b.EgressApps[key] != 1 || b.IngressApps[key] != 1 {
 		t.Errorf("expected self egress/ingress keyed by the -l label, got egress=%v ingress=%v", b.EgressApps, b.IngressApps)
+	}
+}
+
+// Hubble ORs repeated --label filters: one stream covers every audited label.
+func TestObserveCmdLabels(t *testing.T) {
+	got := strings.Join(observeCmd([]string{"app=a", "app=b"}, 0, true, ""), " ")
+	want := "hubble observe --output json --label app=a --label app=b --follow"
+	if got != want {
+		t.Errorf("observeCmd = %q, want %q", got, want)
+	}
+	got = strings.Join(observeCmd(nil, 10, false, ""), " ")
+	want = "hubble observe --output json --last 10"
+	if got != want {
+		t.Errorf("observeCmd(no labels) = %q, want %q", got, want)
 	}
 }

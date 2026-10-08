@@ -51,9 +51,9 @@ type Follower struct {
 
 // FollowOptions narrows what a Follower streams.
 type FollowOptions struct {
-	// Label restricts the stream to flows from or to pods with this
-	// "key=value" label; "" streams every flow on the node.
-	Label string
+	// Labels restricts the stream to flows from or to pods with any of
+	// these "key=value" labels; none streams every flow on the node.
+	Labels []string
 	// CEL is a Hubble --cel-expression applied in the agent, so filtered-out
 	// flows never cross the exec connection. If an agent's Hubble rejects
 	// it, that pod's stream restarts without it and Keep alone does the
@@ -65,11 +65,11 @@ type FollowOptions struct {
 	Keep func(line []byte) bool
 }
 
-// StartFollow starts the persistent per-pod streams for label and returns
-// immediately; call Wait to block until ctx is cancelled and every stream has
-// torn down.
-func StartFollow(ctx context.Context, k *kube.Client, label string, onFlow func(*hubble.Flow)) (*Follower, error) {
-	return StartFollowWith(ctx, k, FollowOptions{Label: label}, onFlow)
+// StartFollow starts the persistent per-pod streams for flows from or to pods
+// with any of labels and returns immediately; call Wait to block until ctx is
+// cancelled and every stream has torn down.
+func StartFollow(ctx context.Context, k *kube.Client, labels []string, onFlow func(*hubble.Flow)) (*Follower, error) {
+	return StartFollowWith(ctx, k, FollowOptions{Labels: labels}, onFlow)
 }
 
 // StartFollowWith is StartFollow with filtering options.
@@ -234,7 +234,7 @@ func (s *supervisor) start(ctx context.Context, ps *podStream) {
 				}
 			}
 			upTimer := time.AfterFunc(upAfter, resumed)
-			err := followPod(ctx, s.exec, ps.pod, observeCmd(s.opts.Label, 0, true, cel), s.opts.Keep, resumed, s.onFlow)
+			err := followPod(ctx, s.exec, ps.pod, observeCmd(s.opts.Labels, 0, true, cel), s.opts.Keep, resumed, s.onFlow)
 			upTimer.Stop()
 			if err != nil && cel != "" && isCELRejection(err) && ctx.Err() == nil {
 				first, _, _ := strings.Cut(err.Error(), "\n") // later lines point at a column

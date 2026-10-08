@@ -23,7 +23,7 @@ Get the rules to add to your policy:
 Stop:
   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
 {{- else }}
-cnpgen is now watching {{ .Values.target.label }} and writing its policy into "{{ .Values.target.namespace }}".
+cnpgen is now watching {{ include "cnpgen.targetLabels" . | fromJsonArray | join ", " }} and writing its policy into "{{ .Values.target.namespace }}".
 
 Watch it work:
   kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "cnpgen.fullname" . }}

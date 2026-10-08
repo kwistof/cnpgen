@@ -1,10 +1,14 @@
+{{- $labels := include "cnpgen.targetLabels" . | fromJsonArray }}
 {{- if eq .Values.audit.mode "verify-all" }}
-{{- if .Values.target.label }}
-{{- fail "target.label must be empty with audit.mode=verify-all: it checks every policy (target.namespace, if set, limits it to one namespace)" }}
+{{- if $labels }}
+{{- fail "target.label and target.labels must be empty with audit.mode=verify-all: it checks every policy (target.namespace, if set, limits it to one namespace)" }}
 {{- end }}
 {{- else }}
-{{- if not .Values.target.label }}
-{{- fail "target.label is required, e.g. --set target.label=app.kubernetes.io/name=my-app" }}
+{{- if not $labels }}
+{{- fail "target.label (or target.labels) is required, e.g. --set target.label=app.kubernetes.io/name=my-app" }}
+{{- end }}
+{{- if and (eq .Values.audit.mode "verify") (gt (len $labels) 1) }}
+{{- fail "audit.mode=verify takes a single label: set target.label only (or use audit.mode=verify-all)" }}
 {{- end }}
 {{- if not .Values.target.namespace }}
 {{- fail "target.namespace is required, e.g. --set target.namespace=my-namespace" }}
@@ -60,8 +64,10 @@ spec:
             - /out
             {{- else }}
             - {{ .Values.audit.mode }}
+            {{- range $labels }}
             - -l
-            - {{ .Values.target.label | quote }}
+            - {{ . | quote }}
+            {{- end }}
             - -n
             - {{ .Values.target.namespace | quote }}
             - -o

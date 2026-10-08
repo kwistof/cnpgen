@@ -133,10 +133,14 @@ func Run(ctx context.Context, k *kube.Client, cfg Config) error {
 		}
 	}
 
+	var labels []string // none with --all: every flow on the node
+	if cfg.Label != "" {
+		labels = []string{cfg.Label}
+	}
 	follower, err := collect.StartFollowWith(ctx, k, collect.FollowOptions{
-		Label: cfg.Label,
-		CEL:   blockedCEL,
-		Keep:  mayBeBlocked,
+		Labels: labels,
+		CEL:    blockedCEL,
+		Keep:   mayBeBlocked,
 	}, w.onFlow)
 	if err != nil {
 		return fmt.Errorf("starting flow watch: %w", err)

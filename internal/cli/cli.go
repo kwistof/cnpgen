@@ -45,6 +45,23 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// labelFlag is -l/--label: repeatable, it collects every value into labels,
+// and label holds the last one for the commands that take a single label
+// (requireTarget rejects more there).
+type labelFlag struct{ g *globalFlags }
+
+func (f labelFlag) String() string {
+	if f.g == nil {
+		return ""
+	}
+	return f.g.label
+}
+func (f labelFlag) Set(v string) error {
+	f.g.labels = append(f.g.labels, v)
+	f.g.label = v
+	return nil
+}
+
 // globalFlags are shared by both subcommands.
 type globalFlags struct {
 	context         string
@@ -56,6 +73,7 @@ type globalFlags struct {
 	noBanner        bool
 
 	label       string
+	labels      []string // every -l given; see labelFlag
 	namespace   string
 	output      string
 	allowDomain stringList
@@ -67,8 +85,8 @@ type globalFlags struct {
 }
 
 func (g *globalFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&g.label, "l", "", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
-	fs.StringVar(&g.label, "label", "", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
+	fs.Var(labelFlag{g}, "l", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
+	fs.Var(labelFlag{g}, "label", "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required)")
 	fs.StringVar(&g.namespace, "n", "default", "namespace to watch pods in and write/deploy the policy into")
 	fs.StringVar(&g.namespace, "namespace", "default", "namespace to watch pods in and write/deploy the policy into")
 	fs.StringVar(&g.output, "o", "netpol-out", "output directory for the generated policy files")
@@ -219,13 +237,18 @@ func cmdAudit(argv []string) int {
 	fs.IntVar(&settle, "settle", 0, "stop once N rounds in a row see no new blocked traffic (0 = never auto-stop)")
 	fs.IntVar(&duration, "duration", 120, "how many seconds to watch per round")
 	fs.BoolVar(&dryRun, "dry-run", false, "preview the policy without touching the cluster")
+	for _, name := range []string{"l", "label"} {
+		fs.Lookup(name).Usage = "pods to watch, by label, e.g. app.kubernetes.io/name=foo (required; repeatable: " +
+			"one policy per label, all sharing one flow stream per Cilium agent)"
+	}
 
 	fs.Usage = func() {
 		printGrouped("audit",
 			"Watch live traffic for the selected pods and build a working CiliumNetworkPolicy,\n"+
 				"deployed in safe (non-enforcing) mode. Runs until you stop it (Ctrl+C) or it\n"+
 				"settles. The deployed policy is removed at the end; the policy file is kept.",
-			"  cnpgen audit -l app.kubernetes.io/name=my-app -n my-namespace --settle 3",
+			"  cnpgen audit -l app.kubernetes.io/name=my-app -n my-namespace --settle 3\n"+
+				"  cnpgen audit -l app.kubernetes.io/name=frontend -l app.kubernetes.io/name=backend -n my-namespace",
 			fs, [][2]any{
 				{"Target", []string{"l", "n"}},
 				{"Run control", []string{"duration", "settle", "last", "dry-run", "o"}},
@@ -241,8 +264,12 @@ func cmdAudit(argv []string) int {
 	ui.Debug = g.debug
 	showBanner(&g)
 
-	if code, ok := requireTarget(&g); !ok {
+	if code, ok := requireTarget(&g, true); !ok {
 		return code
+	}
+	labels := dedupe(g.labels)
+	if len(labels) > 1 && g.seedPolicy != "" {
+		return fail("--seed-policy takes a single -l: it seeds the policy of one app")
 	}
 
 	cfg := g.newSettings()
@@ -259,13 +286,13 @@ func cmdAudit(argv []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	initial, err := seedFlows(ctx, k, g.label, flows, last)
+	initial, err := seedFlows(ctx, k, labels, flows, last)
 	if err != nil {
 		return fail("%v", err)
 	}
 
-	_, _, err = audit.Run(ctx, k, cfg, audit.Config{
-		Label:     g.label,
+	_, err = audit.Run(ctx, k, cfg, audit.Config{
+		Labels:    labels,
 		Namespace: g.namespace,
 		OutDir:    g.output,
 		Settle:    settle,
@@ -338,7 +365,7 @@ func cmdVerify(argv []string) int {
 		if !set["o"] && !set["out"] {
 			out = "missing-rules"
 		}
-	} else if code, ok := requireTarget(&g); !ok {
+	} else if code, ok := requireTarget(&g, false); !ok {
 		return code
 	}
 
@@ -394,7 +421,7 @@ func cmdGenerate(argv []string) int {
 	ui.Debug = g.debug
 	showBanner(&g)
 
-	if code, ok := requireTarget(&g); !ok {
+	if code, ok := requireTarget(&g, false); !ok {
 		return code
 	}
 	if flows == "" {
@@ -464,7 +491,7 @@ func cmdCleanup(argv []string) int {
 	var g globalFlags
 	g.register(fs)
 	for _, name := range []string{"l", "label"} {
-		fs.Lookup(name).Usage = "only delete the policies deployed by `cnpgen audit` with this same -l"
+		fs.Lookup(name).Usage = "only delete the policies deployed by `cnpgen audit` with this same -l (repeatable)"
 	}
 	var scaleDown, scaleDownNamespace string
 	fs.StringVar(&scaleDown, "scale-down", "", "scale this Deployment to 0 and wait for it to drain before deleting policies")
@@ -511,10 +538,18 @@ func cmdCleanup(argv []string) int {
 		}
 	}
 
-	names, err := k.ListManagedNames(ctx, g.namespace, generate.ManagedByLabel, generate.ManagedByValue,
-		generate.TargetAnnotation, g.label)
-	if err != nil {
-		return fail("listing cnpgen-managed policies in %q: %v", g.namespace, err)
+	targets := dedupe(g.labels)
+	if len(targets) == 0 {
+		targets = []string{""} // every cnpgen-managed policy
+	}
+	var names []string
+	for _, label := range targets {
+		n, err := k.ListManagedNames(ctx, g.namespace, generate.ManagedByLabel, generate.ManagedByValue,
+			generate.TargetAnnotation, label)
+		if err != nil {
+			return fail("listing cnpgen-managed policies in %q: %v", g.namespace, err)
+		}
+		names = append(names, n...)
 	}
 	if len(names) == 0 {
 		fmt.Println(ui.Dim("No cnpgen-managed policies in " + g.namespace + "."))
@@ -674,9 +709,18 @@ func cmdReview(argv []string) int {
 // requireTarget validates the target flags with a fix-oriented message.
 // Returns (exitCode, ok). -l is always required; -n defaults to "default" but
 // can't be passed empty.
-func requireTarget(g *globalFlags) (int, bool) {
+// multi allows several -l.
+func requireTarget(g *globalFlags, multi bool) (int, bool) {
 	if g.label == "" {
 		return fail("pass -l <label> to pick which pods to watch, e.g. -l app.kubernetes.io/name=my-app"), false
+	}
+	for _, l := range g.labels {
+		if l == "" {
+			return fail("-l can't be empty"), false
+		}
+	}
+	if !multi && len(g.labels) > 1 {
+		return fail("pass -l only once here (only `cnpgen audit` and `cnpgen cleanup` take several)"), false
 	}
 	if g.namespace == "" {
 		return fail("-n <namespace> can't be empty: it's both which namespace to watch pods in and where the policy is written"), false
@@ -684,7 +728,20 @@ func requireTarget(g *globalFlags) (int, bool) {
 	return 0, true
 }
 
-func seedFlows(ctx context.Context, k *kube.Client, label, flowsFile string, last int) ([]*hubble.Flow, error) {
+// dedupe drops repeated values, keeping the first occurrence's order.
+func dedupe(values []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func seedFlows(ctx context.Context, k *kube.Client, labels []string, flowsFile string, last int) ([]*hubble.Flow, error) {
 	if flowsFile != "" {
 		f, err := collect.LoadFlowsFile(flowsFile)
 		if err != nil {
@@ -699,9 +756,16 @@ func seedFlows(ctx context.Context, k *kube.Client, label, flowsFile string, las
 		fmt.Println(ui.Dim("Starting from nothing (--last 0): round 1 only uses live traffic."))
 		return nil, nil
 	}
-	f, err := collect.CollectLast(ctx, k, label, last, "")
-	if err != nil {
-		return nil, err
+	// One batch per label, so each gets the same last N flows as it would
+	// audited alone (with all labels in one batch, a busy app would crowd
+	// out a quiet one).
+	var f []*hubble.Flow
+	for _, label := range labels {
+		lf, err := collect.CollectLast(ctx, k, label, last, "")
+		if err != nil {
+			return nil, err
+		}
+		f = append(f, lf...)
 	}
 	fmt.Println(ui.Dim(fmt.Sprintf("Starting from the last %d flow(s) already seen "+
 		"(may include traffic from before this run, pass --last 0 to skip that).", last)))
