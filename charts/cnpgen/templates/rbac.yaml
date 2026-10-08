@@ -63,6 +63,36 @@ roleRef:
   name: {{ include "cnpgen.fullname" . }}-selfscale
   apiGroup: rbac.authorization.k8s.io
 ---
+{{- if and .Values.rbac.lookupPodIPs (has .Values.audit.mode (list "verify" "verify-all")) }}
+# List pods in every namespace (filtered by IP server-side), to name the pod or
+# node behind a blocked peer IP Cilium has no identity for.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-pod-ips
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cnpgen.fullname" . }}-pod-ips
+  labels:
+    {{- include "cnpgen.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cnpgen.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "cnpgen.fullname" . }}-pod-ips
+  apiGroup: rbac.authorization.k8s.io
+---
+{{- end }}
 {{- if ne .Values.audit.mode "verify-all" }}
 # List pods in the watched namespace, for the upfront "does anything actually
 # match -l/-n" sanity check.

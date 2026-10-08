@@ -199,6 +199,42 @@ func (c *Client) CountPodsMatching(ctx context.Context, label, namespace string)
 	return len(list.Items), nil
 }
 
+// PodRef is a pod found by PodsWithIP.
+type PodRef struct {
+	Namespace   string
+	Name        string
+	Node        string
+	HostNetwork bool
+	Done        bool // Succeeded or Failed: keeps its IP in status, but no longer holds it
+	Labels      map[string]string
+}
+
+// PodsWithIP returns the pods whose status.podIP is ip, in any namespace.
+// The field selector is applied by the API server (from its watch cache, with
+// ResourceVersion "0"), so only the matching pods come back. A node's IP
+// matches the hostNetwork pods running on it.
+func (c *Client) PodsWithIP(ctx context.Context, ip string) ([]PodRef, error) {
+	list, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector:   "status.podIP=" + ip,
+		ResourceVersion: "0",
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PodRef, 0, len(list.Items))
+	for _, p := range list.Items {
+		out = append(out, PodRef{
+			Namespace:   p.Namespace,
+			Name:        p.Name,
+			Node:        p.Spec.NodeName,
+			HostNetwork: p.Spec.HostNetwork,
+			Done:        p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed,
+			Labels:      p.Labels,
+		})
+	}
+	return out, nil
+}
+
 // CiliumPods returns the Cilium agent pods, filtered by the node set if given.
 func (c *Client) CiliumPods(ctx context.Context) ([]Pod, error) {
 	list, err := c.clientset.CoreV1().Pods(c.ciliumNamespace).List(ctx, metav1.ListOptions{

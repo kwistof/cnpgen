@@ -3,7 +3,10 @@
 // and the selectors / names derived from it.
 package labels
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // appLabelKeys are the label keys, in priority order, that identify the "app"
 // of an endpoint. The service account comes last: Cilium sets it on every pod,
@@ -115,4 +118,48 @@ func AppToPolicyName(app string) string {
 	}
 	r := strings.NewReplacer(":", "-", "/", "-")
 	return r.Replace(app)
+}
+
+// generatedKeys are pod labels Kubernetes sets itself, per controller
+// revision or per pod: selecting on them would match one rollout or one pod,
+// not the workload.
+var generatedKeys = map[string]bool{
+	"pod-template-hash":                        true,
+	"controller-revision-hash":                 true,
+	"pod-template-generation":                  true,
+	"controller-uid":                           true,
+	"job-name":                                 true,
+	"statefulset.kubernetes.io/pod-name":       true,
+	"apps.kubernetes.io/pod-index":             true,
+	"batch.kubernetes.io/controller-uid":       true,
+	"batch.kubernetes.io/job-name":             true,
+	"batch.kubernetes.io/job-completion-index": true,
+}
+
+// FallbackSelector picks a selector label for a pod GetApp finds no app
+// label on, in the same "k8s:key=value" form: the first (sorted) of the
+// pod's own labels, skipping those Kubernetes or Cilium generate, or failing
+// that its namespace label, so the selector is never narrower than the pod.
+// Returns "" when ns is "".
+func FallbackSelector(lbls []string, ns string) string {
+	var own []string
+	for _, l := range lbls {
+		key, val, ok := strings.Cut(l, "=")
+		if !ok || val == "" || !strings.HasPrefix(key, "k8s:") {
+			continue
+		}
+		k := stripK8sPrefix(key)
+		if strings.HasPrefix(k, "io.kubernetes.") || strings.HasPrefix(k, "io.cilium.") || generatedKeys[k] {
+			continue
+		}
+		own = append(own, l)
+	}
+	if len(own) > 0 {
+		sort.Strings(own)
+		return own[0]
+	}
+	if ns == "" {
+		return ""
+	}
+	return "k8s:io.kubernetes.pod.namespace=" + ns
 }

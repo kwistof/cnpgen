@@ -101,6 +101,7 @@ and `verify-all` modes, nothing on the cluster is touched.
 | image.tag | string | `""` | Image tag. Defaults to the chart's `appVersion`. |
 | nodeSelector | object | `{}` | Pod node selector. |
 | rbac.create | bool | `true` | Create the ClusterRole/ClusterRoleBinding (manage CiliumNetworkPolicies) and Role/RoleBinding (exec into Cilium pods). |
+| rbac.lookupPodIPs | bool | `true` | With `audit.mode: verify` or `verify-all`, also let cnpgen list pods in every namespace, to say which pod or node holds a blocked peer IP Cilium has no identity for (or that none does: a stale IP). Pod objects include their env values, so turn this off if that access is too broad; cnpgen then logs those peers by IP only. |
 | resources | object | `{}` | Pod resource requests/limits. |
 | serviceAccount.create | bool | `true` | Create a ServiceAccount for the Job. |
 | serviceAccount.name | string | `""` | ServiceAccount name. Empty uses the chart's fullname. |

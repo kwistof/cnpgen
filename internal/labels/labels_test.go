@@ -65,3 +65,29 @@ func TestAppToPolicyName(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestFallbackSelector(t *testing.T) {
+	cases := []struct {
+		labels []string
+		ns     string
+		want   string
+	}{
+		// Own labels win, sorted; generated and Cilium/Kubernetes ones are skipped.
+		{[]string{
+			"k8s:pod-template-hash=abc",
+			"k8s:tier=web",
+			"k8s:io.cilium.k8s.policy.serviceaccount=default",
+			"k8s:control-plane=solr",
+			"k8s:io.kubernetes.pod.namespace=x",
+		}, "x", "k8s:control-plane=solr"},
+		// Nothing usable: the namespace.
+		{[]string{"k8s:controller-revision-hash=1", "k8s:io.kubernetes.pod.namespace=x"}, "x", "k8s:io.kubernetes.pod.namespace=x"},
+		// Non-k8s sources are not pod labels.
+		{[]string{"cidr:10.0.0.0/8"}, "", ""},
+	}
+	for _, c := range cases {
+		if got := FallbackSelector(c.labels, c.ns); got != c.want {
+			t.Errorf("FallbackSelector(%v, %q) = %q, want %q", c.labels, c.ns, got, c.want)
+		}
+	}
+}

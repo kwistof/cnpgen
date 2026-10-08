@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -122,6 +123,7 @@ func Run(ctx context.Context, k *kube.Client, cfg Config) error {
 	}
 
 	w := newWatcher(cfg, newResolver(ctx, k, cfg.FqdnDump), ix)
+	w.ips = newIPInfo(ctx, k)
 	if !cfg.All {
 		// Write the (empty) file up front, so it exists even if nothing is
 		// ever blocked and a bad path fails fast instead of on the first
@@ -242,6 +244,7 @@ func newRuleSet(path, name, title, note string) *ruleSet {
 type watcher struct {
 	cfg     Config
 	res     *resolver
+	ips     *ipInfo    // nil: don't look up IPs Cilium has no identity for
 	mu      sync.Mutex // onFlow is called concurrently, one goroutine per Cilium pod
 	ix      *policyindex.Index
 	single  *ruleSet // label mode's only file
@@ -274,10 +277,9 @@ func (w *watcher) onFlow(f *hubble.Flow) {
 		return
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	rs, pk, port, ok := w.classify(f)
 	if !ok {
+		w.mu.Unlock()
 		return // not a policy we check (e.g. the peer's own egress), allowed by an allow-all rule, or no L4 info
 	}
 	w.blocked++
@@ -286,7 +288,17 @@ func (w *watcher) onFlow(f *hubble.Flow) {
 	if w.cfg.All {
 		prefix = "[" + rs.name + "] "
 	}
-	fmt.Println(logLine(f, pk, port, isNew, prefix))
+	w.mu.Unlock()
+
+	// Outside the lock: it may call the API server, and must not hold up
+	// the other agents' streams meanwhile.
+	note := ""
+	if pk.kind == "cidr" && w.ips != nil {
+		if p, err := netip.ParsePrefix(pk.value); err == nil {
+			note = w.ips.describe(p.Addr().String())
+		}
+	}
+	fmt.Println(logLine(f, pk, port, isNew, prefix, note))
 }
 
 // flush rewrites the files whose rules changed since their last write.
@@ -505,10 +517,14 @@ func podName(ep hubble.Endpoint) string {
 }
 
 // peer picks the best identity for the other side of a flow: a pod label
-// in-cluster, a Cilium entity for reserved identities, a resolved FQDN for
+// in-cluster (one of its own labels, or its namespace, when it has no app
+// label), a Cilium entity for reserved identities, a resolved FQDN for
 // external IPs, otherwise the raw IP as a /32.
 func (w *watcher) peer(ep hubble.Endpoint, ip string, names []string) peerKey {
 	app := labels.GetApp(ep.Labels)
+	if app == "" && !isReserved(ep) {
+		app = labels.FallbackSelector(ep.Labels, namespaceOf(ep))
+	}
 	switch {
 	case app != "" && !strings.HasPrefix(app, "reserved:"):
 		return peerKey{kind: "endpoint", value: app, ns: namespaceOf(ep)}
@@ -532,8 +548,9 @@ func (w *watcher) peer(ep hubble.Endpoint, ip string, names []string) peerKey {
 	return peerKey{kind: "cidr", value: ip + "/32"}
 }
 
-// logLine renders one blocked flow.
-func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix string) string {
+// logLine renders one blocked flow. note, if set, says who holds a peer IP
+// Cilium has no identity for.
+func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix, note string) string {
 	ts := time.Now()
 	if t, err := time.Parse(time.RFC3339Nano, f.Time); err == nil {
 		ts = t.Local()
@@ -545,6 +562,10 @@ func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix string
 		dst = pk.value + " (" + f.DstIP() + ")"
 	case pk.dir == "ingress" && pk.kind == "fqdn":
 		src = pk.value + " (" + f.SrcIP() + ")"
+	case pk.dir == "egress" && note != "":
+		dst += " (" + note + ")"
+	case pk.dir == "ingress" && note != "":
+		src += " (" + note + ")"
 	}
 	line := fmt.Sprintf("%s  BLOCKED %-7s  %s%s -> %s  %d/%s",
 		ts.Format("15:04:05"), pk.dir, prefix, src, dst, port.port, port.proto)
@@ -554,10 +575,19 @@ func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix string
 	return line
 }
 
-// describe renders an endpoint as "app.namespace", or its IP when it has no
-// pod identity.
+// describe renders an endpoint as "app.namespace", "pod-name.namespace" for
+// a pod with no app label, or its IP when it has no pod identity.
 func describe(ep hubble.Endpoint, ip string) string {
 	app := labels.GetApp(ep.Labels)
+	if app == "" && !isReserved(ep) {
+		if ns := namespaceOf(ep); ns != "" {
+			name := ep.PodName
+			if name == "" {
+				name = "?"
+			}
+			return name + "." + ns
+		}
+	}
 	if app == "" || app == "reserved:world" {
 		if ip == "" {
 			return "?"
