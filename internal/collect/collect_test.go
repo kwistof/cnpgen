@@ -157,3 +157,47 @@ func TestObserveCmdLabels(t *testing.T) {
 		t.Errorf("observeCmd(no labels) = %q, want %q", got, want)
 	}
 }
+
+func TestExtractIngressFromUnlabelledPod(t *testing.T) {
+	job := []string{
+		"k8s:io.kubernetes.pod.namespace=jobs",
+		"k8s:batch.kubernetes.io/job-name=notify-29857686",
+		"k8s:job-name=notify-29857686",
+	}
+	back := []string{"k8s:app.kubernetes.io/name=backend"}
+	flows := []*hubble.Flow{flow(job, back, "jobs", "webshop", 8080, "TCP", "", "L3_L4", false)}
+	g := ExtractConnections(flows, "app.kubernetes.io/name=backend", "webshop")
+	b := g.Buckets()[model.Endpoint{App: "k8s:app.kubernetes.io/name=backend", Namespace: "webshop"}]
+	if b == nil {
+		t.Fatal("no bucket for backend")
+	}
+	// Per-run Job labels are skipped: the pod is selected by its namespace.
+	key := model.AppConn{Peer: model.Endpoint{App: "k8s:io.kubernetes.pod.namespace=jobs", Namespace: "jobs"}, Port: 8080, Proto: "TCP"}
+	if b.IngressApps[key] != 1 {
+		t.Errorf("expected ingress from the jobs namespace, got %v", b.IngressApps)
+	}
+}
+
+func TestExtractIngressFromReserved(t *testing.T) {
+	back := []string{"k8s:app.kubernetes.io/name=backend"}
+	label := "app.kubernetes.io/name=backend"
+	ingress := flow([]string{"reserved:ingress"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
+	world := flow([]string{"reserved:world"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
+	unknown := flow([]string{"reserved:unknown"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
+
+	g := ExtractConnections([]*hubble.Flow{ingress, world, unknown}, label, "webshop")
+	b := g.Buckets()[model.Endpoint{App: "k8s:app.kubernetes.io/name=backend", Namespace: "webshop"}]
+	if b == nil {
+		t.Fatal("no bucket for backend")
+	}
+	key := model.AppConn{Peer: model.Endpoint{App: "reserved:ingress"}, Port: 8080, Proto: "TCP"}
+	if b.IngressApps[key] != 1 || len(b.IngressApps) != 1 {
+		t.Errorf("expected only ingress from the ingress entity, got %v", b.IngressApps)
+	}
+
+	for f, want := range map[*hubble.Flow]string{ingress: "", world: NoIdentity, unknown: NotSelectable} {
+		if got := Unusable(f, label, "webshop"); got != want {
+			t.Errorf("Unusable(%v) = %q, want %q", f.Source.Labels, got, want)
+		}
+	}
+}

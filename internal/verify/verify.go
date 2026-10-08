@@ -112,7 +112,7 @@ func SummarizeDrops(flows []*hubble.Flow) map[DropKey]int {
 		}
 		src, dst := flow.Source, flow.Destination
 		srcApp := labels.GetApp(src.Labels)
-		if srcApp == "" {
+		if srcApp == "" || srcApp == "reserved:world" {
 			srcApp = flow.SrcIP()
 		}
 		if srcApp == "" {
@@ -156,7 +156,13 @@ func PrintDropSummary(counter map[DropKey]int) {
 		total += c
 	}
 	fmt.Println(ui.Yellow(fmt.Sprintf("  %d would-be-dropped (%d distinct):", total, len(counter))))
+	for _, line := range FormatDropSummary(counter) {
+		fmt.Println(line)
+	}
+}
 
+// FormatDropSummary renders one line per drop, most-frequent first.
+func FormatDropSummary(counter map[DropKey]int) []string {
 	type row struct {
 		k DropKey
 		c int
@@ -166,9 +172,11 @@ func PrintDropSummary(counter map[DropKey]int) {
 		rows = append(rows, row{k, c})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].c > rows[j].c })
+	lines := make([]string, 0, len(rows))
 	for _, r := range rows {
 		k := r.k
-		fmt.Printf("    %4dx  %s (%s) -> %s (%s)  port=%d/%s\n",
-			r.c, k.SrcApp, k.SrcNS, k.DstApp, k.DstNS, k.Port, k.Proto)
+		lines = append(lines, fmt.Sprintf("    %4dx  %s (%s) -> %s (%s)  port=%d/%s",
+			r.c, k.SrcApp, k.SrcNS, k.DstApp, k.DstNS, k.Port, k.Proto))
 	}
+	return lines
 }

@@ -57,66 +57,143 @@ func ExtractConnections(flows []*hubble.Flow, label, namespace string) *model.Co
 func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, namespace string) {
 	ourApp := labels.LabelToApp(label)
 	for _, flow := range flows {
-		if flow == nil || flow.IsReply {
-			continue
-		}
-		// SOCK-layer flows are pre-translation/pre-policy-decision socket
-		// observations that report a generic identity for traffic a later
-		// L3_L4/TO_STACK/TO_ENDPOINT flow already captures correctly. Including
-		// them produces duplicate, wrongly-scoped, or overly broad rules.
-		if flow.Type == "SOCK" {
-			continue
-		}
-
-		src, dst := flow.Source, flow.Destination
-		srcOurs := IsOurs(src, label, namespace)
-		dstOurs := IsOurs(dst, label, namespace)
-		// Our pods are identified by the -l label itself, not by whichever app
-		// label GetApp picks: that names the policy and is its endpointSelector,
-		// and an app label like app.kubernetes.io/name may be shared with pods
-		// outside the audited set (e.g. other instances of the same chart).
-		srcApp := labels.GetApp(src.Labels)
-		if srcOurs && ourApp != "" {
-			srcApp = ourApp
-		}
-		port, proto := flow.Port()
-		dstApp := labels.GetPeerApp(dst.Labels, port)
-		if dstOurs && ourApp != "" {
-			dstApp = ourApp
-		}
-		if srcApp == "" || dstApp == "" {
-			ui.Log("Skipping flow with missing app labels: src=%q dst=%q", srcApp, dstApp)
-			continue
-		}
-
-		srcNS := epNamespace(src)
-		dstNS := epNamespace(dst)
-
-		srcKey := model.Endpoint{App: srcApp, Namespace: srcNS}
-		dstKey := model.Endpoint{App: dstApp, Namespace: dstNS}
-
-		// Egress: source is one of our target pods.
-		if srcOurs {
-			bucket := graph.Bucket(srcApp, srcNS)
-			if dstApp == "reserved:world" {
-				ip := flow.DstIP()
-				if ip == "" {
-					ip = "UNKNOWN"
-				}
-				bucket.EgressExternal[model.ExtConn{IP: ip, Port: port, Proto: proto}]++
-			} else {
-				bucket.EgressApps[model.AppConn{Peer: dstKey, Port: port, Proto: proto}]++
+		c, reason := classify(flow, label, namespace, ourApp)
+		if reason != "" {
+			if reason == reasonNoApp {
+				ui.Log("Skipping flow with missing app labels: src=%q dst=%q", c.src.App, c.dst.App)
 			}
+			continue
 		}
-
-		// Ingress: destination is one of our target pods (skip reserved src/dst).
-		if dstOurs &&
-			!strings.HasPrefix(dstApp, "reserved:") &&
-			!strings.HasPrefix(srcApp, "reserved:") {
-			bucket := graph.Bucket(dstApp, dstNS)
-			bucket.IngressApps[model.AppConn{Peer: srcKey, Port: port, Proto: proto}]++
+		switch {
+		case c.external:
+			graph.Bucket(c.src.App, c.src.Namespace).EgressExternal[model.ExtConn{IP: c.ip, Port: c.port, Proto: c.proto}]++
+		case c.egress:
+			graph.Bucket(c.src.App, c.src.Namespace).EgressApps[model.AppConn{Peer: c.dst, Port: c.port, Proto: c.proto}]++
+		}
+		if c.ingress {
+			graph.Bucket(c.dst.App, c.dst.Namespace).IngressApps[model.AppConn{Peer: c.src, Port: c.port, Proto: c.proto}]++
 		}
 	}
+}
+
+// Reasons classify gives for a flow that makes no rule.
+const (
+	reasonIgnored = "ignored"
+	reasonNoApp   = "no app identity"
+	// NoIdentity is the reason for traffic into our pods from an IP Cilium
+	// had no identity for (reserved:world): an external client, or a pod the
+	// node hadn't learned about yet (e.g. a short-lived Job pod). Neither can
+	// be selected by a stable rule, so it's left to the operator.
+	NoIdentity = "source has no Cilium identity (reserved:world)"
+	// NotSelectable is the reason for traffic into our pods from a reserved
+	// identity that isn't a Cilium entity (e.g. reserved:unknown).
+	NotSelectable = "source is a reserved identity no rule can select"
+)
+
+type conn struct {
+	src, dst                  model.Endpoint
+	port                      int32
+	proto                     string
+	ip                        string // external destination IP, when external
+	egress, external, ingress bool
+}
+
+// classify works out which rules a flow makes. reason is non-empty when it
+// makes none.
+func classify(flow *hubble.Flow, label, namespace, ourApp string) (conn, string) {
+	var c conn
+	if flow == nil || flow.IsReply {
+		return c, reasonIgnored
+	}
+	// SOCK-layer flows are pre-translation/pre-policy-decision socket
+	// observations that report a generic identity for traffic a later
+	// L3_L4/TO_STACK/TO_ENDPOINT flow already captures correctly. Including
+	// them produces duplicate, wrongly-scoped, or overly broad rules.
+	if flow.Type == "SOCK" {
+		return c, reasonIgnored
+	}
+
+	src, dst := flow.Source, flow.Destination
+	srcOurs := IsOurs(src, label, namespace)
+	dstOurs := IsOurs(dst, label, namespace)
+	if !srcOurs && !dstOurs {
+		return c, reasonIgnored
+	}
+	srcNS, dstNS := epNamespace(src), epNamespace(dst)
+	// Our pods are identified by the -l label itself, not by whichever app
+	// label GetApp picks: that names the policy and is its endpointSelector,
+	// and an app label like app.kubernetes.io/name may be shared with pods
+	// outside the audited set (e.g. other instances of the same chart).
+	srcApp := labels.GetApp(src.Labels)
+	if srcOurs && ourApp != "" {
+		srcApp = ourApp
+	}
+	c.port, c.proto = flow.Port()
+	dstApp := labels.GetPeerApp(dst.Labels, c.port)
+	if dstOurs && ourApp != "" {
+		dstApp = ourApp
+	}
+	// A pod with no app label (e.g. a CronJob's) is selected by one of its
+	// own stable labels, or its namespace, as verify does.
+	if srcApp == "" && !isReserved(src) {
+		srcApp = labels.FallbackSelector(src.Labels, srcNS)
+	}
+	if dstApp == "" && !isReserved(dst) {
+		dstApp = labels.FallbackSelector(dst.Labels, dstNS)
+	}
+	c.src = model.Endpoint{App: srcApp, Namespace: srcNS}
+	c.dst = model.Endpoint{App: dstApp, Namespace: dstNS}
+	if srcApp == "" || dstApp == "" {
+		return c, reasonNoApp
+	}
+
+	// Egress: source is one of our target pods.
+	if srcOurs {
+		if dstApp == "reserved:world" {
+			c.external = true
+			c.ip = flow.DstIP()
+			if c.ip == "" {
+				c.ip = "UNKNOWN"
+			}
+		} else {
+			c.egress = true
+		}
+	}
+
+	// Ingress: destination is one of our target pods. Reserved sources are
+	// allowed by fromEntities, when they are a Cilium entity.
+	if dstOurs && !strings.HasPrefix(dstApp, "reserved:") {
+		switch {
+		case srcApp == "reserved:world":
+			return c, NoIdentity
+		case strings.HasPrefix(srcApp, "reserved:"):
+			if _, ok := labels.Entity(srcApp); !ok {
+				return c, NotSelectable
+			}
+			c.src.Namespace = ""
+			c.ingress = true
+		default:
+			c.ingress = true
+		}
+	}
+	return c, ""
+}
+
+// Unusable says why a flow makes no rule for the pods label and namespace
+// select, or "" when it makes one. Audit uses it to tell traffic still
+// missing from the policy from traffic no generated rule can allow.
+func Unusable(flow *hubble.Flow, label, namespace string) string {
+	_, reason := classify(flow, label, namespace, labels.LabelToApp(label))
+	return reason
+}
+
+func isReserved(ep hubble.Endpoint) bool {
+	for _, l := range ep.Labels {
+		if strings.HasPrefix(l, "reserved:") {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadFlowsFile loads flows from a file, accepting either a JSON array or

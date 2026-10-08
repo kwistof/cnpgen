@@ -153,6 +153,28 @@ func TestNodeEntitiesAreAllowed(t *testing.T) {
 	}
 }
 
+func TestIngressFromEntitiesIsAllowed(t *testing.T) {
+	b := &model.ConnBucket{
+		EgressApps:     map[model.AppConn]int{},
+		EgressExternal: map[model.ExtConn]int{},
+		IngressApps: map[model.AppConn]int{
+			{Peer: model.Endpoint{App: "reserved:ingress"}, Port: 8080, Proto: "TCP"}: 1,
+			// An unlabelled pod, selected by its namespace.
+			{Peer: model.Endpoint{App: "k8s:io.kubernetes.pod.namespace=jobs", Namespace: "jobs"}, Port: 8080, Proto: "TCP"}: 1,
+		},
+	}
+	p := BuildPolicy("k8s:app.kubernetes.io/name=backend", "webshop", b, model.NewResolveIndex(), settings.Settings{}, false, true, nil)
+	if p == nil {
+		t.Fatal("expected a policy, got nil")
+	}
+	y := p.YAML()
+	for _, s := range []string{"fromEntities:", "- ingress", "fromEndpoints:", "io.kubernetes.pod.namespace: jobs", `port: "8080"`} {
+		if !strings.Contains(y, s) {
+			t.Errorf("policy YAML missing %q:\n%s", s, y)
+		}
+	}
+}
+
 func TestReservedAppNoPolicy(t *testing.T) {
 	b := &model.ConnBucket{
 		EgressApps: map[model.AppConn]int{}, EgressExternal: map[model.ExtConn]int{}, IngressApps: map[model.AppConn]int{},

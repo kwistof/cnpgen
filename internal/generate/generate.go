@@ -444,6 +444,14 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 	}
 	ingressGroups := newSelectorGrouper("fromEndpoints")
 	for _, peer := range sortedEndpoints(ingressMap) {
+		if entity, ok := labels.Entity(peer.App); ok {
+			rule := newOMap().set("fromEntities", []any{entity})
+			if ports := buildPorts(ingressMap[peer]); ports != nil {
+				rule.set("toPorts", ports)
+			}
+			ingressRules = append(ingressRules, rule)
+			continue
+		}
 		sel := peerSelector(peer, ns)
 		if sel == nil {
 			continue

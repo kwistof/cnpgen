@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -375,9 +376,10 @@ func Run(ctx context.Context, k *kube.Client, cfg settings.Settings, ac Config, 
 			}
 
 			heading(t)
-			drops := forLabel(dropFlows, t.label)
+			drops, unusable := splitUnusable(forLabel(dropFlows, t.label), t.label, ac.Namespace)
 			counter := verify.SummarizeDrops(drops)
 			verify.PrintDropSummary(counter)
+			printUnusable(unusable)
 
 			if len(counter) > 0 {
 				// New blocked traffic: reset the stable streak and feed it
@@ -533,4 +535,39 @@ func joinComma(s []string) string {
 		out += x
 	}
 	return out
+}
+
+// splitUnusable separates would-be-dropped flows no generated rule can allow
+// (see collect.Unusable), grouped by reason, from the rest. Those are only
+// reported: feeding them back would never change the policy, and they'd keep
+// the run from settling.
+func splitUnusable(flows []*hubble.Flow, label, namespace string) ([]*hubble.Flow, map[string][]*hubble.Flow) {
+	var usable []*hubble.Flow
+	unusable := map[string][]*hubble.Flow{}
+	for _, f := range flows {
+		if reason := collect.Unusable(f, label, namespace); reason == collect.NoIdentity || reason == collect.NotSelectable {
+			unusable[reason] = append(unusable[reason], f)
+		} else {
+			usable = append(usable, f)
+		}
+	}
+	return usable, unusable
+}
+
+func printUnusable(unusable map[string][]*hubble.Flow) {
+	reasons := make([]string, 0, len(unusable))
+	for r := range unusable {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	for _, r := range reasons {
+		fmt.Println(ui.Dim(fmt.Sprintf("  Not added, %s:", r)))
+		for _, line := range verify.FormatDropSummary(verify.SummarizeDrops(unusable[r])) {
+			fmt.Println(ui.Dim(line))
+		}
+	}
+	if len(unusable[collect.NoIdentity]) > 0 {
+		fmt.Println(ui.Dim("  An external client, or a pod the node didn't know yet (e.g. a Job pod that only lived a moment). " +
+			"Allow it by hand if it's expected (fromCIDR, or fromEndpoints for a pod)."))
+	}
 }
