@@ -184,8 +184,10 @@ func TestExtractIngressFromReserved(t *testing.T) {
 	ingress := flow([]string{"reserved:ingress"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
 	world := flow([]string{"reserved:world"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
 	unknown := flow([]string{"reserved:unknown"}, back, "", "webshop", 8080, "TCP", "", "L3_L4", false)
+	// Kubelet probes: Cilium always lets the local host in.
+	host := flow([]string{"reserved:host"}, back, "", "webshop", 15021, "TCP", "", "L3_L4", false)
 
-	g := ExtractConnections([]*hubble.Flow{ingress, world, unknown}, label, "webshop")
+	g := ExtractConnections([]*hubble.Flow{ingress, world, unknown, host}, label, "webshop")
 	b := g.Buckets()[model.Endpoint{App: "k8s:app.kubernetes.io/name=backend", Namespace: "webshop"}]
 	if b == nil {
 		t.Fatal("no bucket for backend")

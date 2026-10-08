@@ -161,9 +161,13 @@ func classify(flow *hubble.Flow, label, namespace, ourApp string) (conn, string)
 	}
 
 	// Ingress: destination is one of our target pods. Reserved sources are
-	// allowed by fromEntities, when they are a Cilium entity.
+	// allowed by fromEntities, when they are a Cilium entity, except the
+	// local host: Cilium always lets it reach local pods (allow-localhost),
+	// so kubelet probes need no rule.
 	if dstOurs && !strings.HasPrefix(dstApp, "reserved:") {
 		switch {
+		case srcApp == "reserved:host":
+			return c, reasonIgnored
 		case srcApp == "reserved:world":
 			return c, NoIdentity
 		case strings.HasPrefix(srcApp, "reserved:"):
