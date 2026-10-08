@@ -534,8 +534,9 @@ func (w *watcher) peer(ep hubble.Endpoint, ip string, port int32, names []string
 	switch {
 	case app != "" && !strings.HasPrefix(app, "reserved:"):
 		return peerKey{kind: "endpoint", value: app, ns: namespaceOf(ep)}
-	case app != "" && app != "reserved:world":
-		return peerKey{kind: "entity", value: strings.TrimPrefix(app, "reserved:")}
+	}
+	if entity, ok := labels.Entity(app); ok {
+		return peerKey{kind: "entity", value: entity}
 	}
 	if ip == "" {
 		return peerKey{}

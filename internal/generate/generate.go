@@ -460,27 +460,24 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 	}
 	egressGroups := newSelectorGrouper("toEndpoints")
 	for _, peer := range sortedEndpoints(egressMap) {
-		var rule *omap
-		switch {
-		case strings.HasPrefix(peer.App, "reserved:"):
-			// Reserved identities (kube-apiserver, host, remote-node, ...)
-			// map one-to-one onto Cilium entities.
-			rule = newOMap().set("toEntities", []any{strings.TrimPrefix(peer.App, "reserved:")})
-		default:
-			sel := peerSelector(peer, ns)
-			if sel == nil {
-				continue
+		if entity, ok := labels.Entity(peer.App); ok {
+			rule := newOMap().set("toEntities", []any{entity})
+			if ports := buildPorts(egressMap[peer]); ports != nil {
+				rule.set("toPorts", ports)
 			}
-			isKubeDNS := labels.AppToLabelSelector(peer.App)["k8s-app"] == "kube-dns"
-			if rule = egressGroups.add(sel, egressMap[peer], isKubeDNS); rule != nil {
-				egressRules = append(egressRules, rule)
-			}
+			egressRules = append(egressRules, rule)
 			continue
 		}
-		if ports := buildPorts(egressMap[peer]); ports != nil {
-			rule.set("toPorts", ports)
+		// Other reserved identities (e.g. reserved:unknown) have no selector
+		// and are skipped here.
+		sel := peerSelector(peer, ns)
+		if sel == nil {
+			continue
 		}
-		egressRules = append(egressRules, rule)
+		isKubeDNS := labels.AppToLabelSelector(peer.App)["k8s-app"] == "kube-dns"
+		if rule := egressGroups.add(sel, egressMap[peer], isKubeDNS); rule != nil {
+			egressRules = append(egressRules, rule)
+		}
 	}
 
 	// ---- egress to external (FQDN / CIDR) ----

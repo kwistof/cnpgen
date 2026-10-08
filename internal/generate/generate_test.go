@@ -132,6 +132,8 @@ func TestNodeEntitiesAreAllowed(t *testing.T) {
 		EgressApps: map[model.AppConn]int{
 			{Peer: model.Endpoint{App: "reserved:host"}, Port: 4318, Proto: "TCP"}:        1,
 			{Peer: model.Endpoint{App: "reserved:remote-node"}, Port: 4318, Proto: "TCP"}: 1,
+			// No identity: not a Cilium entity, so no rule.
+			{Peer: model.Endpoint{App: "reserved:unknown"}}: 1,
 		},
 		EgressExternal: map[model.ExtConn]int{},
 		IngressApps:    map[model.AppConn]int{},
@@ -145,6 +147,9 @@ func TestNodeEntitiesAreAllowed(t *testing.T) {
 		if !strings.Contains(y, s) {
 			t.Errorf("policy YAML missing %q:\n%s", s, y)
 		}
+	}
+	if strings.Contains(y, "unknown") {
+		t.Errorf("reserved:unknown must not become an entity rule:\n%s", y)
 	}
 }
 

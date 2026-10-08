@@ -59,6 +59,23 @@ func TestGetPeerApp(t *testing.T) {
 	}
 }
 
+func TestEntity(t *testing.T) {
+	cases := map[string]string{
+		"reserved:host":           "host",
+		"reserved:remote-node":    "remote-node",
+		"reserved:kube-apiserver": "kube-apiserver",
+		"reserved:unknown":        "",
+		"reserved:world":          "",
+		"k8s:app=foo":             "",
+	}
+	for app, want := range cases {
+		got, ok := Entity(app)
+		if got != want || ok != (want != "") {
+			t.Errorf("Entity(%q) = %q, %v, want %q", app, got, ok, want)
+		}
+	}
+}
+
 func TestGetNamespace(t *testing.T) {
 	if got := GetNamespace([]string{"k8s:io.kubernetes.pod.namespace=webshop"}); got != "webshop" {
 		t.Errorf("got %q", got)

@@ -127,6 +127,25 @@ func stripK8sPrefix(key string) string {
 	return strings.TrimPrefix(key, "k8s:")
 }
 
+// entities are the reserved identities that are also Cilium policy entities.
+// reserved:world is left out (external traffic is allowed by FQDN or CIDR),
+// and so is reserved:unknown, Cilium's placeholder for traffic it couldn't
+// attach an identity to, which no rule can select.
+var entities = map[string]bool{
+	"host": true, "remote-node": true, "kube-apiserver": true,
+	"health": true, "init": true, "ingress": true, "unmanaged": true,
+}
+
+// Entity returns the Cilium entity (for toEntities/fromEntities) a reserved
+// app identifier stands for, or false if it has none.
+func Entity(app string) (string, bool) {
+	name, ok := strings.CutPrefix(app, "reserved:")
+	if !ok || !entities[name] {
+		return "", false
+	}
+	return name, true
+}
+
 // isReserved reports whether an app string is a Cilium reserved identity.
 func isReserved(app string) bool {
 	return strings.HasPrefix(app, "reserved:")
