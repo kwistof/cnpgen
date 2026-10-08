@@ -180,7 +180,7 @@ func usage() {
   cnpgen verify   --all [-n <namespace>] [options]       same, for every policy at once
   cnpgen generate -l <label> -n <namespace> --flows <f>  build policy files offline from a saved flows file
   cnpgen cleanup  -n <namespace> [-l <label>]            delete cnpgen-managed policies from a namespace
-  cnpgen review   [-o <dir>]                             interactively accept/decline wildcard suggestions
+  cnpgen review   [file|dir ...]                         choose which domain groups to allow as *.suffix wildcards
   cnpgen version                                         print the version
 
 Quick start:
@@ -581,14 +581,52 @@ type reviewRow struct {
 }
 
 // reviewLabel renders a picker row for a wildcard-suggestion group: the
-// suffix in bold on the main line (checked/unchecked already says whether
-// it's wildcarded, so that state isn't repeated in words), and the observed
-// domain list on its own line underneath.
+// wildcard it would become on the main line, and the exact domains it
+// replaces underneath, so checking a row visibly means "use the wildcard".
 func reviewLabel(g review.Group) (label, sub string) {
-	return ui.Bold("*." + g.Suffix), fmt.Sprintf("%d domain(s): %s", len(g.Members), strings.Join(g.Members, ", "))
+	return ui.Bold("*."+g.Suffix) + ui.Dim(" (wildcard)"),
+		fmt.Sprintf("instead of %d exact domain(s): %s", len(g.Members), strings.Join(g.Members, ", "))
 }
 
-// cmdReview walks every *.yaml/*.yml file in the output directory, finds the
+// reviewFiles expands the paths given to `cnpgen review` into the policy
+// files to scan: a file is taken as is, a directory contributes its
+// *.yaml/*.yml files (not recursively). Sorted, without duplicates.
+func reviewFiles(paths []string) ([]string, error) {
+	seen := map[string]bool{}
+	var files []string
+	add := func(path string) {
+		path = filepath.Clean(path)
+		if !seen[path] {
+			seen[path] = true
+			files = append(files, path)
+		}
+	}
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			add(p)
+			continue
+		}
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !e.IsDir() && (strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")) {
+				add(filepath.Join(p, name))
+			}
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// cmdReview reads the policy files given as arguments (files, or directories
+// whose *.yaml/*.yml files are all taken; netpol-out by default), finds the
 // wildcard-suggestion/wildcard-applied marker comments generate left behind,
 // and lets the operator check/uncheck which ones should be wildcarded in a
 // single picker, then rewrites every changed file in place. It never touches
@@ -599,42 +637,54 @@ func cmdReview(argv []string) int {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	var output string
 	var noBanner bool
-	fs.StringVar(&output, "o", "netpol-out", "directory of generated policy files to review")
-	fs.StringVar(&output, "output", "netpol-out", "directory of generated policy files to review")
+	// -o/--output is kept for scripts written before review took paths.
+	fs.StringVar(&output, "o", "", "directory of policy files to review (same as passing it as an argument)")
+	fs.StringVar(&output, "output", "", "directory of policy files to review (same as passing it as an argument)")
 	fs.BoolVar(&noBanner, "no-banner", false, "suppress the banner")
 	fs.Usage = func() {
-		printGrouped("review",
-			"Check or uncheck which wildcard-eligible domain groups should be collapsed\n"+
-				"into a *.suffix pattern, then rewrite the affected policy files in place.\n"+
-				"Re-run cnpgen audit/generate afterwards and a decision stays only if the\n"+
-				"same suggestion still applies.",
-			"  cnpgen review -o netpol-out",
-			fs, [][2]any{
-				{"Input", []string{"o"}},
-				{"Misc", []string{"no-banner"}},
-			})
+		fmt.Fprint(os.Stderr, "Choose which groups of sibling domains to allow through one wildcard\n"+
+			"(matchPattern: \"*.suffix\") instead of one matchName per observed domain,\n"+
+			"then rewrite the affected policy files in place. Re-run cnpgen\n"+
+			"audit/generate afterwards and a decision stays only if the same suggestion\n"+
+			"still applies.\n\n"+
+			"Usage:\n  cnpgen review [options] [file|dir ...]   (default: netpol-out)\n\n"+
+			"Example:\n"+
+			"  cnpgen review\n"+
+			"  cnpgen review netpol-out/my-app.yaml\n\n"+
+			"Misc:\n")
+		fmt.Fprintf(os.Stderr, "  %-22s %s\n\n", "-no-banner", fs.Lookup("no-banner").Usage)
 	}
-	if err := fs.Parse(argv); err != nil {
-		return 2
+	// The flag package stops at the first positional argument: keep parsing
+	// after each one so flags may come after the paths too.
+	var paths []string
+	for {
+		if err := fs.Parse(argv); err != nil {
+			return 2
+		}
+		argv = fs.Args()
+		if len(argv) == 0 {
+			break
+		}
+		paths = append(paths, argv[0])
+		argv = argv[1:]
+	}
+	if output != "" {
+		paths = append(paths, output)
+	}
+	if len(paths) == 0 {
+		paths = []string{"netpol-out"}
 	}
 	if !noBanner {
 		fmt.Fprint(os.Stderr, banner)
 	}
 
-	entries, err := os.ReadDir(output)
+	files, err := reviewFiles(paths)
 	if err != nil {
-		return fail("reading %s: %v", output, err)
+		return fail("%v", err)
 	}
-	var files []string
-	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() && (strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")) {
-			files = append(files, filepath.Join(output, name))
-		}
-	}
-	sort.Strings(files)
+	where := strings.Join(paths, ", ")
 	if len(files) == 0 {
-		fmt.Println(ui.Dim("No policy files in " + output + "."))
+		fmt.Println(ui.Dim("No policy files in " + where + "."))
 		return 0
 	}
 
@@ -652,7 +702,7 @@ func cmdReview(argv []string) int {
 		}
 	}
 	if len(rows) == 0 {
-		fmt.Println(ui.Dim("No wildcard suggestions in " + output + "."))
+		fmt.Println(ui.Dim("No wildcard suggestions in " + where + "."))
 		return 0
 	}
 
@@ -661,11 +711,14 @@ func cmdReview(argv []string) int {
 	for i, r := range rows {
 		label, sub := reviewLabel(r.group)
 		if multiFile {
-			label = ui.Dim(filepath.Base(r.path)+": ") + label
+			label = ui.Dim(r.path+": ") + label
 		}
 		items[i] = ui.PickerItem{Label: label, SubLabel: sub, Checked: r.group.Wildcarded}
 	}
 
+	fmt.Println("Checked: allow the group through its " + ui.Bold("*.suffix") + " wildcard (one matchPattern).")
+	fmt.Println("Unchecked: keep one exact matchName per observed domain.")
+	fmt.Println()
 	picked, ok := ui.Picker("Space/Enter to toggle a group, arrows to move, Esc to cancel:", items)
 	if !ok {
 		fmt.Println(ui.Dim("Cancelled, nothing changed."))
@@ -677,6 +730,7 @@ func cmdReview(argv []string) int {
 	}
 
 	toggleBySuffix := map[string]map[string]bool{} // path -> suffix -> toggle?
+	var changes []string
 	for i, r := range rows {
 		if wantChecked[i] == r.group.Wildcarded {
 			continue // no change needed
@@ -685,13 +739,19 @@ func cmdReview(argv []string) int {
 			toggleBySuffix[r.path] = map[string]bool{}
 		}
 		toggleBySuffix[r.path][r.suffix] = true
+		if wantChecked[i] {
+			changes = append(changes, fmt.Sprintf("  %s: %s now replaces %d exact domain(s)",
+				r.path, ui.Bold("*."+r.suffix), len(r.group.Members)))
+		} else {
+			changes = append(changes, fmt.Sprintf("  %s: %s back to %d exact domain(s)",
+				r.path, ui.Bold("*."+r.suffix), len(r.group.Members)))
+		}
 	}
 	if len(toggleBySuffix) == 0 {
 		fmt.Println(ui.Dim("Nothing changed."))
 		return 0
 	}
 
-	changed := 0
 	for path, suffixes := range toggleBySuffix {
 		out, err := review.ToggleAll(fileLines[path], suffixes)
 		if err != nil {
@@ -700,9 +760,11 @@ func cmdReview(argv []string) int {
 		if err := os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
 			return fail("writing %s: %v", path, err)
 		}
-		changed += len(suffixes)
 	}
-	fmt.Println(ui.Green(fmt.Sprintf("Updated %d group(s) across %d file(s).", changed, len(toggleBySuffix))))
+	fmt.Println(ui.Green(fmt.Sprintf("Updated %d group(s) across %d file(s):", len(changes), len(toggleBySuffix))))
+	for _, c := range changes {
+		fmt.Println(c)
+	}
 	return 0
 }
 

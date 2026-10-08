@@ -146,8 +146,9 @@ which costs it noticeably more CPU on a busy node.
 # Build policy files offline from a saved flows file
 cnpgen generate -l app.kubernetes.io/name=my-app -n my-namespace --flows flows.json
 
-# Choose which sibling domains to merge into wildcards (e.g. *.auth0.com)
-cnpgen review -o netpol-out
+# Choose which sibling domains to allow through one wildcard (e.g. *.auth0.com)
+# instead of one exact name each; takes files or directories (default: netpol-out)
+cnpgen review netpol-out/my-app.yaml
 
 # Delete the policies cnpgen deployed in a namespace
 cnpgen cleanup -n my-namespace
