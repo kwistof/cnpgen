@@ -55,6 +55,7 @@ func ExtractConnections(flows []*hubble.Flow, label, namespace string) *model.Co
 // the number of distinct (src,dst,port,proto) tuples ever seen, not by
 // traffic volume.
 func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, namespace string) {
+	ourApp := labels.LabelToApp(label)
 	for _, flow := range flows {
 		if flow == nil || flow.IsReply {
 			continue
@@ -68,8 +69,20 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		}
 
 		src, dst := flow.Source, flow.Destination
+		srcOurs := IsOurs(src, label, namespace)
+		dstOurs := IsOurs(dst, label, namespace)
+		// Our pods are identified by the -l label itself, not by whichever app
+		// label GetApp picks: that names the policy and is its endpointSelector,
+		// and an app label like app.kubernetes.io/name may be shared with pods
+		// outside the audited set (e.g. other instances of the same chart).
 		srcApp := labels.GetApp(src.Labels)
+		if srcOurs && ourApp != "" {
+			srcApp = ourApp
+		}
 		dstApp := labels.GetApp(dst.Labels)
+		if dstOurs && ourApp != "" {
+			dstApp = ourApp
+		}
 		if srcApp == "" || dstApp == "" {
 			ui.Log("Skipping flow with missing app labels: src=%q dst=%q", srcApp, dstApp)
 			continue
@@ -83,7 +96,7 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		dstKey := model.Endpoint{App: dstApp, Namespace: dstNS}
 
 		// Egress: source is one of our target pods.
-		if IsOurs(src, label, namespace) {
+		if srcOurs {
 			bucket := graph.Bucket(srcApp, srcNS)
 			if dstApp == "reserved:world" {
 				ip := flow.DstIP()
@@ -97,7 +110,7 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		}
 
 		// Ingress: destination is one of our target pods (skip reserved src/dst).
-		if IsOurs(dst, label, namespace) &&
+		if dstOurs &&
 			!strings.HasPrefix(dstApp, "reserved:") &&
 			!strings.HasPrefix(srcApp, "reserved:") {
 			bucket := graph.Bucket(dstApp, dstNS)

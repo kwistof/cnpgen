@@ -122,3 +122,23 @@ func TestParseLineSentinel(t *testing.T) {
 		t.Errorf("expected nil flow for sentinel, got %v %v", f, err)
 	}
 }
+
+func TestExtractNamesOurPodsByTheLabel(t *testing.T) {
+	// The audited pods also carry app.kubernetes.io/name=ms, shared with other
+	// instances: the bucket (so the policy name and endpointSelector) must use
+	// the -l label, and so must a self-connection's peer.
+	ms := []string{"k8s:app.kubernetes.io/name=ms", "k8s:app.kubernetes.io/instance=adm-slowquery-1"}
+	flows := []*hubble.Flow{
+		flow(ms, ms, "dif", "dif", 8080, "TCP", "", "L3_L4", false),
+	}
+	g := ExtractConnections(flows, "app.kubernetes.io/instance=adm-slowquery-1", "dif")
+	ours := model.Endpoint{App: "k8s:app.kubernetes.io/instance=adm-slowquery-1", Namespace: "dif"}
+	b := g.Buckets()[ours]
+	if b == nil || g.Len() != 1 {
+		t.Fatalf("expected a single bucket keyed by the -l label, got %v", g.Buckets())
+	}
+	key := model.AppConn{Peer: ours, Port: 8080, Proto: "TCP"}
+	if b.EgressApps[key] != 1 || b.IngressApps[key] != 1 {
+		t.Errorf("expected self egress/ingress keyed by the -l label, got egress=%v ingress=%v", b.EgressApps, b.IngressApps)
+	}
+}

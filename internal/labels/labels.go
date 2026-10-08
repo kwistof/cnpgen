@@ -96,6 +96,19 @@ func isReserved(app string) bool {
 	return strings.HasPrefix(app, "reserved:")
 }
 
+// LabelToApp turns a "key=value" pod label (as given to -l) into the same
+// canonical "k8s:key=value" form GetApp returns, so the pods it selects can be
+// named, and selected in a policy, by that label rather than by whichever app
+// label GetApp would pick. Returns "" if label isn't "key=value".
+func LabelToApp(label string) string {
+	key, val, ok := strings.Cut(label, "=")
+	key, val = strings.TrimSpace(key), strings.TrimSpace(val)
+	if !ok || key == "" || val == "" {
+		return ""
+	}
+	return "k8s:" + stripK8sPrefix(key) + "=" + val
+}
+
 // AppToLabelSelector converts a canonical app string into a {key: value}
 // matchLabels map. Returns nil for reserved identities (world/host/
 // kube-apiserver), which must be expressed via toEntities/fromEntities.

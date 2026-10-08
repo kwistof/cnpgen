@@ -91,3 +91,17 @@ func TestFallbackSelector(t *testing.T) {
 		}
 	}
 }
+
+func TestLabelToApp(t *testing.T) {
+	for in, want := range map[string]string{
+		"app.kubernetes.io/instance=adm-slowquery-1": "k8s:app.kubernetes.io/instance=adm-slowquery-1",
+		"k8s:app=foo": "k8s:app=foo",
+		" app = foo ": "k8s:app=foo",
+		"app":         "",
+		"app=":        "",
+	} {
+		if got := LabelToApp(in); got != want {
+			t.Errorf("LabelToApp(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
