@@ -34,6 +34,31 @@ func TestGetApp(t *testing.T) {
 	}
 }
 
+func TestGetPeerApp(t *testing.T) {
+	controlPlane := []string{"reserved:kube-apiserver", "reserved:remote-node"}
+	cases := []struct {
+		labels []string
+		port   int32
+		want   string
+	}{
+		{[]string{"reserved:remote-node"}, 4318, "reserved:remote-node"},
+		{[]string{"reserved:kube-apiserver"}, 4318, "reserved:kube-apiserver"},
+		// A node running the API server: named by the port.
+		{controlPlane, 6443, "reserved:kube-apiserver"},
+		{controlPlane, 443, "reserved:kube-apiserver"},
+		{controlPlane, 4318, "reserved:remote-node"},
+		{[]string{"reserved:host", "reserved:kube-apiserver"}, 10250, "reserved:host"},
+		// Dual-stack world is still world.
+		{[]string{"reserved:world-ipv4"}, 443, "reserved:world"},
+		{[]string{"reserved:world-ipv6"}, 443, "reserved:world"},
+	}
+	for _, c := range cases {
+		if got := GetPeerApp(c.labels, c.port); got != c.want {
+			t.Errorf("GetPeerApp(%v, %d) = %q, want %q", c.labels, c.port, got, c.want)
+		}
+	}
+}
+
 func TestGetNamespace(t *testing.T) {
 	if got := GetNamespace([]string{"k8s:io.kubernetes.pod.namespace=webshop"}); got != "webshop" {
 		t.Errorf("got %q", got)

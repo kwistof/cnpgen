@@ -112,14 +112,14 @@ func SummarizeDrops(flows []*hubble.Flow) map[DropKey]int {
 		if srcApp == "" {
 			srcApp = "?"
 		}
-		dstApp := labels.GetApp(dst.Labels)
+		port, proto := flow.Port()
+		dstApp := labels.GetPeerApp(dst.Labels, port)
 		if dstApp == "" || dstApp == "reserved:world" {
 			dstApp = flow.DstIP()
 			if dstApp == "" {
 				dstApp = "?"
 			}
 		}
-		port, proto := flow.Port()
 		srcNS := src.Namespace
 		if srcNS == "" {
 			srcNS = labels.GetNamespace(src.Labels)

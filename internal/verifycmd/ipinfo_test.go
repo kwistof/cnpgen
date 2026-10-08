@@ -142,7 +142,7 @@ func TestPodWithoutAppLabel(t *testing.T) {
 		"k8s:io.cilium.k8s.policy.serviceaccount=default",
 		"k8s:io.kubernetes.pod.namespace=solr",
 	}}
-	pk := w.peer(solr, "10.244.3.3", nil)
+	pk := w.peer(solr, "10.244.3.3", 0, nil)
 	if pk.kind != "endpoint" || pk.value != "k8s:control-plane=solr-operator" || pk.ns != "solr" {
 		t.Fatalf("peer = %+v", pk)
 	}

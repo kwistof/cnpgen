@@ -462,10 +462,10 @@ func BuildPolicy(app, ns string, bucket *model.ConnBucket, index *model.ResolveI
 	for _, peer := range sortedEndpoints(egressMap) {
 		var rule *omap
 		switch {
-		case strings.HasPrefix(peer.App, "reserved:kube-apiserver"):
-			rule = newOMap().set("toEntities", []any{"kube-apiserver"})
-		case strings.HasPrefix(peer.App, "reserved:host"):
-			rule = newOMap().set("toEntities", []any{"host"})
+		case strings.HasPrefix(peer.App, "reserved:"):
+			// Reserved identities (kube-apiserver, host, remote-node, ...)
+			// map one-to-one onto Cilium entities.
+			rule = newOMap().set("toEntities", []any{strings.TrimPrefix(peer.App, "reserved:")})
 		default:
 			sel := peerSelector(peer, ns)
 			if sel == nil {

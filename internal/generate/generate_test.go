@@ -127,6 +127,27 @@ func TestPruneTempDNSRemovesWhenUnused(t *testing.T) {
 	}
 }
 
+func TestNodeEntitiesAreAllowed(t *testing.T) {
+	b := &model.ConnBucket{
+		EgressApps: map[model.AppConn]int{
+			{Peer: model.Endpoint{App: "reserved:host"}, Port: 4318, Proto: "TCP"}:        1,
+			{Peer: model.Endpoint{App: "reserved:remote-node"}, Port: 4318, Proto: "TCP"}: 1,
+		},
+		EgressExternal: map[model.ExtConn]int{},
+		IngressApps:    map[model.AppConn]int{},
+	}
+	p := BuildPolicy("k8s:app.kubernetes.io/name=otelapp", "webshop", b, model.NewResolveIndex(), settings.Settings{}, false, true, nil)
+	if p == nil {
+		t.Fatal("expected a policy, got nil")
+	}
+	y := p.YAML()
+	for _, s := range []string{"- host", "- remote-node", `port: "4318"`} {
+		if !strings.Contains(y, s) {
+			t.Errorf("policy YAML missing %q:\n%s", s, y)
+		}
+	}
+}
+
 func TestReservedAppNoPolicy(t *testing.T) {
 	b := &model.ConnBucket{
 		EgressApps: map[model.AppConn]int{}, EgressExternal: map[model.ExtConn]int{}, IngressApps: map[model.AppConn]int{},

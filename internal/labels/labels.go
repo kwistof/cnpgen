@@ -4,6 +4,7 @@
 package labels
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -30,10 +31,45 @@ const serviceAccountKey = "k8s:io.cilium.k8s.policy.serviceaccount"
 // "reserved:world" / "reserved:host" for reserved identities. Returns "" when
 // no recognized label is present.
 func GetApp(lbls []string) string {
+	return GetPeerApp(lbls, 0)
+}
+
+// apiServerPorts are the ports traffic to the Kubernetes API server uses, as
+// Cilium sees them (after service translation).
+var apiServerPorts = map[int32]bool{443: true, 6443: true}
+
+// GetPeerApp is GetApp for the destination of a flow to port. A reserved
+// identity can carry several labels: when the API server runs on a node (kind,
+// kubeadm), that node's IP is both reserved:kube-apiserver and
+// reserved:host/remote-node. Traffic to it on an API server port is named
+// kube-apiserver; anything else (e.g. a node-local agent) is named after the
+// node entity, so the rule doesn't allow it as API server traffic.
+func GetPeerApp(lbls []string, port int32) string {
+	var reserved []string
 	for _, l := range lbls {
 		// Reserved identities look like "reserved:world" (no '=').
-		if key, val, ok := strings.Cut(l, ":"); ok && key == "reserved" && !strings.Contains(l, "=") {
-			return key + ":" + val
+		if key, _, ok := strings.Cut(l, ":"); ok && key == "reserved" && !strings.Contains(l, "=") {
+			// Dual-stack clusters split world into world-ipv4/world-ipv6:
+			// it's still external traffic, resolved to FQDNs/CIDRs.
+			if strings.HasPrefix(l, "reserved:world") {
+				l = "reserved:world"
+			}
+			reserved = append(reserved, l)
+		}
+	}
+	const apiServer = "reserved:kube-apiserver"
+	switch {
+	case len(reserved) == 1:
+		return reserved[0]
+	case len(reserved) > 1:
+		if apiServerPorts[port] && slices.Contains(reserved, apiServer) {
+			return apiServer
+		}
+		sort.Strings(reserved)
+		for _, r := range reserved {
+			if r != apiServer {
+				return r
+			}
 		}
 	}
 	for _, k := range appLabelKeys {

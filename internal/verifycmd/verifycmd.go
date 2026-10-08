@@ -431,7 +431,12 @@ func (w *watcher) classify(f *hubble.Flow) (*ruleSet, peerKey, portKey, bool) {
 		}
 	}
 
-	pk := w.peer(peer, peerIP, names)
+	// The port names the peer only when it is the destination.
+	var peerPort int32
+	if dir == policyindex.Egress {
+		peerPort = port
+	}
+	pk := w.peer(peer, peerIP, peerPort, names)
 	if pk.value == "" {
 		return nil, peerKey{}, portKey{}, false
 	}
@@ -519,9 +524,10 @@ func podName(ep hubble.Endpoint) string {
 // peer picks the best identity for the other side of a flow: a pod label
 // in-cluster (one of its own labels, or its namespace, when it has no app
 // label), a Cilium entity for reserved identities, a resolved FQDN for
-// external IPs, otherwise the raw IP as a /32.
-func (w *watcher) peer(ep hubble.Endpoint, ip string, names []string) peerKey {
-	app := labels.GetApp(ep.Labels)
+// external IPs, otherwise the raw IP as a /32. port is the flow's destination
+// port when ep is the destination, else 0 (see labels.GetPeerApp).
+func (w *watcher) peer(ep hubble.Endpoint, ip string, port int32, names []string) peerKey {
+	app := labels.GetPeerApp(ep.Labels, port)
 	if app == "" && !isReserved(ep) {
 		app = labels.FallbackSelector(ep.Labels, namespaceOf(ep))
 	}

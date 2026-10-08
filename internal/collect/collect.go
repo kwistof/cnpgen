@@ -79,7 +79,8 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 		if srcOurs && ourApp != "" {
 			srcApp = ourApp
 		}
-		dstApp := labels.GetApp(dst.Labels)
+		port, proto := flow.Port()
+		dstApp := labels.GetPeerApp(dst.Labels, port)
 		if dstOurs && ourApp != "" {
 			dstApp = ourApp
 		}
@@ -90,7 +91,6 @@ func MergeConnections(graph *model.ConnGraph, flows []*hubble.Flow, label, names
 
 		srcNS := epNamespace(src)
 		dstNS := epNamespace(dst)
-		port, proto := flow.Port()
 
 		srcKey := model.Endpoint{App: srcApp, Namespace: srcNS}
 		dstKey := model.Endpoint{App: dstApp, Namespace: dstNS}
