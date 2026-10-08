@@ -9,15 +9,11 @@ import (
 )
 
 // appendBoilerplate adds rules every policy needs regardless of observed
-// traffic: kube-apiserver egress, any --allow-extra destinations, and the
-// kube-dns DNS-visibility rule (required for toFQDNs; temporary during audit).
+// traffic: any --allow-extra destinations, and the kube-dns DNS-visibility rule
+// (required for toFQDNs; temporary during audit).
 // It records the DNS rule (whether injected whole or merged into an existing
 // rule) on the Policy so prune can undo it later. Returns the updated rules.
 func (p *Policy) appendBoilerplate(egressRules []any, cfg settings.Settings, hasFqdns, tempDNS bool) []any {
-	// Every pod may reach the Kubernetes API server. Add the port to an
-	// existing toEntities:[kube-apiserver] rule if one exists, else append.
-	egressRules = addEntityPort(egressRules, "kube-apiserver", 443, "TCP")
-
 	// Extra always-allowed egress destinations.
 	for _, e := range cfg.ExtraEgress {
 		if e.CIDR == "" {
@@ -79,62 +75,6 @@ func (p *Policy) appendBoilerplate(egressRules []any, cfg settings.Settings, has
 				ui.Dim("Removed automatically if no toFQDNs rule ends up needing it."))
 	}
 	return egressRules
-}
-
-// addEntityPort adds `port` to an existing bare toEntities:[entity] rule, else
-// appends a new rule for it.
-func addEntityPort(egressRules []any, entity string, port int32, proto string) []any {
-	for _, item := range egressRules {
-		rule, ok := item.(*omap)
-		if !ok {
-			continue
-		}
-		ent, ok := rule.get("toEntities")
-		if !ok {
-			continue
-		}
-		if list, ok := ent.([]any); ok && len(list) == 1 && list[0] == entity {
-			ports := buildPorts([]portProto{{Port: port, Proto: proto}})
-			existingPorts, has := rule.get("toPorts")
-			if has {
-				ep := existingPorts.([]any)
-				if len(ep) > 0 {
-					first := ep[0].(*omap)
-					fp, _ := first.get("ports")
-					newPorts, _ := ports[0].(*omap).get("ports")
-					existing := fp.([]any)
-					for _, np := range newPorts.([]any) {
-						if !containsPort(existing, np.(*omap)) {
-							existing = append(existing, np)
-						}
-					}
-					first.set("ports", existing)
-				}
-			} else {
-				rule.set("toPorts", ports)
-			}
-			return egressRules
-		}
-	}
-	rule := newOMap().set("toEntities", []any{entity})
-	if ports := buildPorts([]portProto{{Port: port, Proto: proto}}); ports != nil {
-		rule.set("toPorts", ports)
-	}
-	return append(egressRules, rule)
-}
-
-func containsPort(list []any, p *omap) bool {
-	pp, _ := p.get("port")
-	pproto, _ := p.get("protocol")
-	for _, item := range list {
-		om := item.(*omap)
-		port, _ := om.get("port")
-		proto, _ := om.get("protocol")
-		if port == pp && proto == pproto {
-			return true
-		}
-	}
-	return false
 }
 
 // findKubeDNS53Rule returns an existing egress rule targeting kube-dns:53/UDP.

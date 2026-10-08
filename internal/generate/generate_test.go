@@ -47,13 +47,39 @@ func TestBuildPolicyShape(t *testing.T) {
 		"matchName: example.com",           // resolved FQDN
 		"toCIDR:",                          // unresolved
 		"- 5.6.7.8/32",
-		"kube-apiserver",    // boilerplate
 		"k8s-app: kube-dns", // DNS visibility
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(y, s) {
 			t.Errorf("policy YAML missing %q:\n%s", s, y)
 		}
+	}
+	// No API server traffic was observed, so no rule for it.
+	if strings.Contains(y, "kube-apiserver") {
+		t.Errorf("unobserved kube-apiserver egress must not be allowed:\n%s", y)
+	}
+}
+
+func TestObservedAPIServerIsAllowed(t *testing.T) {
+	b := &model.ConnBucket{
+		EgressApps: map[model.AppConn]int{
+			{Peer: model.Endpoint{App: "reserved:kube-apiserver"}, Port: 6443, Proto: "TCP"}: 1,
+		},
+		EgressExternal: map[model.ExtConn]int{},
+		IngressApps:    map[model.AppConn]int{},
+	}
+	p := BuildPolicy("k8s:app.kubernetes.io/name=operator", "webshop", b, model.NewResolveIndex(), settings.Settings{}, false, true, nil)
+	if p == nil {
+		t.Fatal("expected a policy, got nil")
+	}
+	y := p.YAML()
+	for _, s := range []string{"- kube-apiserver", `port: "6443"`} {
+		if !strings.Contains(y, s) {
+			t.Errorf("policy YAML missing %q:\n%s", s, y)
+		}
+	}
+	if strings.Contains(y, `port: "443"`) {
+		t.Errorf("only the observed port should be allowed:\n%s", y)
 	}
 }
 

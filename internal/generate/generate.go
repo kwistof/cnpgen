@@ -5,7 +5,8 @@
 //   - emits enableDefaultDeny:{ingress,egress}:false so it deploys safely
 //   - routes external IPs through resolve+patterns into toFQDNs where possible,
 //     falling back to toCIDR otherwise
-//   - always allows the Kubernetes API server, plus any --allow-extra egress
+//   - always allows any --allow-extra egress (the Kubernetes API server only
+//     when observed, like any other peer)
 //   - carries a kube-dns DNS-visibility rule (temporary, pruned later if unused)
 package generate
 
