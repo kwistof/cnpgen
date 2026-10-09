@@ -29,6 +29,7 @@ import (
 	"github.com/kwistof/cnpgen/internal/hubble"
 	"github.com/kwistof/cnpgen/internal/kube"
 	"github.com/kwistof/cnpgen/internal/pipeline"
+	"github.com/kwistof/cnpgen/internal/policyindex"
 	"github.com/kwistof/cnpgen/internal/resolve"
 	"github.com/kwistof/cnpgen/internal/review"
 	"github.com/kwistof/cnpgen/internal/settings"
@@ -325,7 +326,9 @@ func cmdVerify(argv []string) int {
 
 	var fqdnCache, out string
 	var all bool
+	var exclude stringList
 	fs.BoolVar(&all, "all", false, "check every policy at once instead of -l pods (-n then only limits which namespace)")
+	fs.Var(&exclude, "exclude-policy", "with --all, never put missing rules in this policy unless no other selects the pod: name, namespace/name or clusterwide/name, globs allowed (repeatable)")
 	fs.StringVar(&out, "o", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
 	fs.StringVar(&out, "out", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
 	fs.StringVar(&fqdnCache, "fqdn-cache", "", "resolve destinations from this saved *-fqdn dump instead of the live cache")
@@ -340,7 +343,7 @@ func cmdVerify(argv []string) int {
 			"  cnpgen verify -l app.kubernetes.io/name=my-app -n my-namespace -o missing.yaml\n"+
 				"  cnpgen verify --all -o missing-rules/",
 			fs, [][2]any{
-				{"Target", []string{"l", "n", "all"}},
+				{"Target", []string{"l", "n", "all", "exclude-policy"}},
 				{"Output", []string{"o"}},
 				{"Tuning", []string{"fqdn-cache"}},
 				{"Cluster", []string{"context", "kubeconfig", "cilium-namespace", "cilium-selector", "nodes"}},
@@ -365,6 +368,13 @@ func cmdVerify(argv []string) int {
 		if !set["o"] && !set["out"] {
 			out = "missing-rules"
 		}
+		for _, e := range exclude {
+			if err := policyindex.ValidateExclude(e); err != nil {
+				return fail("--exclude-policy: %v", err)
+			}
+		}
+	} else if len(exclude) > 0 {
+		return fail("--exclude-policy only applies with --all: -l writes every missing rule to one file")
 	} else if code, ok := requireTarget(&g, false); !ok {
 		return code
 	}
@@ -384,6 +394,7 @@ func cmdVerify(argv []string) int {
 		All:       all,
 		Out:       out,
 		FqdnDump:  fqdnCache,
+		Exclude:   policyindex.Excludes(exclude),
 	}); err != nil {
 		return fail("%v", err)
 	}

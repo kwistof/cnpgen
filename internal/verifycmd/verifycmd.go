@@ -77,6 +77,9 @@ type Config struct {
 	All       bool
 	Out       string // rules file, or with All a directory of them
 	FqdnDump  string // resolve from this saved dump instead of the live cache
+	// Exclude, with All, are policies missing rules only go to when nothing
+	// else selects the pod (e.g. a hand-written baseline).
+	Exclude policyindex.Excludes
 }
 
 // Run watches until ctx is cancelled (Ctrl+C / SIGTERM). It never writes to
@@ -458,7 +461,7 @@ func (w *watcher) classify(f *hubble.Flow) (*ruleSet, peerKey, portKey, bool) {
 // ep, a per-app "unattributed" file (and a policy re-list is requested, in
 // case one was created since the last).
 func (w *watcher) setFor(m policyindex.Match, ep hubble.Endpoint) *ruleSet {
-	primary, others := policyindex.Pick(m, ep)
+	primary, others := policyindex.Pick(m, ep, w.cfg.Exclude)
 	if primary == nil {
 		ns := namespaceOf(ep)
 		name := podName(ep)

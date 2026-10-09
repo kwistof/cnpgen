@@ -192,22 +192,37 @@ func TestPick(t *testing.T) {
 	mk := func(name, label string) *Policy {
 		return &Policy{Ref: Ref{Namespace: "webshop", Name: name}, Label: label}
 	}
+	broad := func(name string) *Policy {
+		p := mk(name, "")
+		p.Broad = true
+		return p
+	}
 	fe := ep(1, "webshop", "k8s:app.kubernetes.io/name=frontend")
 	cases := []struct {
 		name     string
 		policies []*Policy
+		ex       Excludes
 		want     string
 		others   int
 	}{
-		{"none", nil, "", 0},
-		{"one", []*Policy{mk("a", "")}, "a", 0},
-		{"first by name", []*Policy{mk("a", ""), mk("b", "")}, "a", 1},
-		{"cnpgen label match wins", []*Policy{mk("a", ""), mk("frontend", "app.kubernetes.io/name=frontend")}, "frontend", 1},
-		{"bootstrap skipped", []*Policy{mk(BootstrapPrefix+"x", ""), mk("z", "")}, "z", 0},
-		{"bootstrap if alone", []*Policy{mk(BootstrapPrefix+"x", "")}, BootstrapPrefix + "x", 0},
+		{"none", nil, nil, "", 0},
+		{"one", []*Policy{mk("a", "")}, nil, "a", 0},
+		{"first by name", []*Policy{mk("a", ""), mk("b", "")}, nil, "a", 1},
+		{"cnpgen label match wins", []*Policy{mk("a", ""), mk("frontend", "app.kubernetes.io/name=frontend")}, nil, "frontend", 1},
+		{"bootstrap skipped", []*Policy{mk(BootstrapPrefix+"x", ""), mk("z", "")}, nil, "z", 0},
+		{"bootstrap if alone", []*Policy{mk(BootstrapPrefix+"x", "")}, nil, BootstrapPrefix + "x", 0},
+		{"broad after specific", []*Policy{broad("a-baseline"), mk("frontend", "")}, nil, "frontend", 1},
+		{"broad after specific, whatever the names", []*Policy{broad("a-baseline"), mk("z", "")}, nil, "z", 1},
+		{"broad if alone", []*Policy{broad("a-baseline")}, nil, "a-baseline", 0},
+		{"broad before bootstrap", []*Policy{mk(BootstrapPrefix+"x", ""), broad("z")}, nil, "z", 0},
+		{"excluded by name", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"a-baseline"}, "frontend", 1},
+		{"excluded by ns/name glob", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"webshop/*-baseline"}, "frontend", 1},
+		{"other namespace not excluded", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"other/a-baseline"}, "a-baseline", 1},
+		{"excluded after broad", []*Policy{mk("a-baseline", ""), broad("b")}, Excludes{"a-baseline"}, "b", 1},
+		{"excluded if alone", []*Policy{mk("a-baseline", "")}, Excludes{"a-baseline"}, "a-baseline", 0},
 	}
 	for _, c := range cases {
-		p, others := Pick(Match{Policies: c.policies}, fe)
+		p, others := Pick(Match{Policies: c.policies}, fe, c.ex)
 		got := ""
 		if p != nil {
 			got = p.Ref.Name
@@ -215,6 +230,46 @@ func TestPick(t *testing.T) {
 		if got != c.want || len(others) != c.others {
 			t.Errorf("%s: got %q + %d others, want %q + %d", c.name, got, len(others), c.want, c.others)
 		}
+	}
+}
+
+func TestBroad(t *testing.T) {
+	cases := []struct {
+		name, kind, specs string
+		want              bool
+	}{
+		{"empty selector", "CiliumNetworkPolicy", `spec: {endpointSelector: {}}`, true},
+		{"namespace only", "CiliumClusterwideNetworkPolicy",
+			`spec: {endpointSelector: {matchLabels: {"k8s:io.kubernetes.pod.namespace": webshop}}}`, true},
+		{"namespace labels only", "CiliumClusterwideNetworkPolicy",
+			`spec: {endpointSelector: {matchLabels: {"k8s:io.cilium.k8s.namespace.labels.team": a}}}`, true},
+		{"pod label", "CiliumNetworkPolicy", `spec: {endpointSelector: {matchLabels: {app: frontend}}}`, false},
+		{"pod expression", "CiliumNetworkPolicy",
+			`spec: {endpointSelector: {matchExpressions: [{key: app, operator: Exists}]}}`, false},
+		{"one specific spec is enough", "CiliumNetworkPolicy",
+			`specs: [{endpointSelector: {}}, {endpointSelector: {matchLabels: {app: frontend}}}]`, false},
+	}
+	for _, c := range cases {
+		p, ok := Parse(obj(t, "kind: "+c.kind+"\nmetadata: {name: p, namespace: webshop}\n"+c.specs))
+		if !ok {
+			t.Fatalf("%s: not parsed", c.name)
+		}
+		if p.Broad != c.want {
+			t.Errorf("%s: Broad = %v, want %v", c.name, p.Broad, c.want)
+		}
+	}
+}
+
+func TestExcludesClusterwide(t *testing.T) {
+	r := Ref{Name: "baseline"}
+	if !(Excludes{"clusterwide/baseline"}).Has(r) || !(Excludes{"baseline"}).Has(r) {
+		t.Error("clusterwide policy not excluded")
+	}
+	if (Excludes{"webshop/baseline"}).Has(r) {
+		t.Error("namespaced pattern excluded a clusterwide policy")
+	}
+	if ValidateExclude("[") == nil {
+		t.Error("malformed pattern accepted")
 	}
 }
 

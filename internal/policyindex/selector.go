@@ -95,6 +95,18 @@ func parseSelector(m map[string]any) (selector, error) {
 	return sel, nil
 }
 
+// podSpecific reports whether s narrows pods down by anything but their
+// namespace (its name or labels): an empty selector, or one on namespace
+// only, is a namespace- or cluster-wide baseline.
+func (s selector) podSpecific() bool {
+	for _, r := range s {
+		if r.key != "io.kubernetes.pod.namespace" && !strings.HasPrefix(r.key, "io.cilium.k8s.namespace.labels.") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s selector) matches(el endpointLabels) bool {
 	for _, r := range s {
 		if !r.matches(el) {

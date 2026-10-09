@@ -14,6 +14,7 @@ package policyindex
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -60,6 +61,10 @@ type Policy struct {
 	// Label is the cnpgen/label annotation ("key=value") cnpgen puts on the
 	// policies it generates, or "".
 	Label string
+	// Broad is true when no spec picks pods by their own labels, only by
+	// namespace (or not at all): a baseline applying to every pod, which
+	// Pick only falls back to.
+	Broad bool
 	specs []spec
 }
 
@@ -88,7 +93,7 @@ func Parse(obj map[string]any) (p *Policy, ok bool) {
 	if obj["kind"] == "CiliumClusterwideNetworkPolicy" {
 		ns = ""
 	}
-	p = &Policy{Ref: Ref{Namespace: ns, Name: name}}
+	p = &Policy{Ref: Ref{Namespace: ns, Name: name}, Broad: true}
 	if ann, _ := meta["annotations"].(map[string]any); ann != nil {
 		p.Label, _ = ann[TargetAnnotation].(string)
 	}
@@ -112,6 +117,9 @@ func Parse(obj map[string]any) (p *Policy, ok bool) {
 		sel, err := parseSelector(es)
 		if err != nil {
 			continue
+		}
+		if sel.podSpecific() {
+			p.Broad = false
 		}
 		if ns != "" {
 			// A CNP only ever selects endpoints in its own namespace.
@@ -256,37 +264,69 @@ func (ix *Index) Match(ep hubble.Endpoint, d Dir) Match {
 }
 
 // Pick chooses which of m's policies a missing rule for ep goes to, and
-// returns the others that would work as well. cnpgen's bootstrap DNS policy
-// is skipped when anything else applies, and a cnpgen-generated policy whose
+// returns the others that would work as well. Candidates are ranked: a
+// policy selecting pods by their own labels first, then a Broad one, then
+// one excluded by ex, and cnpgen's bootstrap DNS policy last (never listed
+// in others). Within the best rank, a cnpgen-generated policy whose
 // cnpgen/label matches the pod is preferred; otherwise the first by name.
 // primary is nil when no policy applies.
-func Pick(m Match, ep hubble.Endpoint) (primary *Policy, others []*Policy) {
-	cands := make([]*Policy, 0, len(m.Policies))
-	for _, p := range m.Policies {
-		if !strings.HasPrefix(p.Ref.Name, BootstrapPrefix) {
-			cands = append(cands, p)
-		}
-	}
-	if len(cands) == 0 {
-		cands = m.Policies
-	}
-	if len(cands) == 0 {
+func Pick(m Match, ep hubble.Endpoint, ex Excludes) (primary *Policy, others []*Policy) {
+	if len(m.Policies) == 0 {
 		return nil, nil
 	}
-	best := 0
-	for i, p := range cands {
-		if p.Label != "" && labels.HasLabel(ep.Labels, p.Label) {
-			best = i
-			break
+	rank := func(p *Policy) int {
+		switch {
+		case strings.HasPrefix(p.Ref.Name, BootstrapPrefix):
+			return 3
+		case ex.Has(p.Ref):
+			return 2
+		case p.Broad:
+			return 1
+		}
+		return 0
+	}
+	best, bestRank, bestLabel := -1, 0, false
+	for i, p := range m.Policies {
+		r := rank(p)
+		label := p.Label != "" && labels.HasLabel(ep.Labels, p.Label)
+		if best < 0 || r < bestRank || (r == bestRank && label && !bestLabel) {
+			best, bestRank, bestLabel = i, r, label
 		}
 	}
-	others = make([]*Policy, 0, len(cands)-1)
-	for i, p := range cands {
-		if i != best {
+	for i, p := range m.Policies {
+		if i != best && !strings.HasPrefix(p.Ref.Name, BootstrapPrefix) {
 			others = append(others, p)
 		}
 	}
-	return cands[best], others
+	return m.Policies[best], others
+}
+
+// Excludes are policies a missing rule should not go to unless nothing else
+// selects the pod (verify --exclude-policy). Each entry is a path.Match
+// pattern against "namespace/name" ("clusterwide/name" for a CCNP), or
+// against the bare name when it has no '/'.
+type Excludes []string
+
+// ValidateExclude reports a malformed pattern.
+func ValidateExclude(pattern string) error {
+	if _, err := path.Match(pattern, ""); err != nil {
+		return fmt.Errorf("bad policy pattern %q: %w", pattern, err)
+	}
+	return nil
+}
+
+// Has reports whether r matches one of the patterns.
+func (ex Excludes) Has(r Ref) bool {
+	for _, pat := range ex {
+		target := r.String()
+		if !strings.Contains(pat, "/") {
+			target = r.Name
+		}
+		if ok, _ := path.Match(pat, target); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Lister lists raw policy objects (kube.Client in production).
