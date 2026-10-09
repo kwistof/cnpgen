@@ -187,14 +187,18 @@ func (p *Policy) selects(ep endpointLabels, d Dir) (selected, covers, allowAll b
 
 // Match is what the index knows about one endpoint in one direction.
 type Match struct {
-	// Policies selecting the endpoint that have rules (or default deny) in
-	// the direction, sorted by Ref. When none do, every policy selecting the
-	// endpoint, so a rule still lands next to the pod's own policy.
+	// Policies selecting the endpoint, sorted by Ref, whether or not they
+	// have rules in the direction: a missing rule can go to any of them.
 	Policies []*Policy
+	// covers[i] is whether Policies[i] has rules (or default deny) in the
+	// direction. nil means all do.
+	covers []bool
 	// AllowAll is true when one of them allows everything in the direction:
 	// a policy_match_type 4 flow there is allowed, not missing a rule.
 	AllowAll bool
 }
+
+func (m Match) covering(i int) bool { return m.covers == nil || m.covers[i] }
 
 // Index is an immutable set of policies plus a lookup cache. Not safe for
 // concurrent use: the cache is filled on lookups, so callers serialize.
@@ -239,20 +243,14 @@ func (ix *Index) Match(ep hubble.Endpoint, d Dir) Match {
 	}
 	el := parseEndpoint(ep)
 	var m Match
-	var selecting []*Policy
 	for _, p := range ix.policies {
 		sel, covers, allowAll := p.selects(el, d)
 		if !sel {
 			continue
 		}
-		selecting = append(selecting, p)
-		if covers {
-			m.Policies = append(m.Policies, p)
-			m.AllowAll = m.AllowAll || allowAll
-		}
-	}
-	if len(m.Policies) == 0 {
-		m.Policies = selecting
+		m.Policies = append(m.Policies, p)
+		m.covers = append(m.covers, covers)
+		m.AllowAll = m.AllowAll || allowAll
 	}
 	if ep.Identity != 0 {
 		if len(ix.cache) >= maxCache {
@@ -268,29 +266,38 @@ func (ix *Index) Match(ep hubble.Endpoint, d Dir) Match {
 // policy selecting pods by their own labels first, then a Broad one, then
 // one excluded by ex, and cnpgen's bootstrap DNS policy last (never listed
 // in others). Within the best rank, a cnpgen-generated policy whose
-// cnpgen/label matches the pod is preferred; otherwise the first by name.
-// primary is nil when no policy applies.
+// cnpgen/label matches the pod is preferred, then one already having rules
+// in the direction, then the first by name. primary is nil when no policy
+// applies.
 func Pick(m Match, ep hubble.Endpoint, ex Excludes) (primary *Policy, others []*Policy) {
 	if len(m.Policies) == 0 {
 		return nil, nil
 	}
-	rank := func(p *Policy) int {
+	// key orders candidates, lowest first; the index breaks ties by name.
+	key := func(i int) [3]int {
+		p := m.Policies[i]
+		var k [3]int
 		switch {
 		case strings.HasPrefix(p.Ref.Name, BootstrapPrefix):
-			return 3
+			k[0] = 3
 		case ex.Has(p.Ref):
-			return 2
+			k[0] = 2
 		case p.Broad:
-			return 1
+			k[0] = 1
 		}
-		return 0
+		if p.Label == "" || !labels.HasLabel(ep.Labels, p.Label) {
+			k[1] = 1
+		}
+		if !m.covering(i) {
+			k[2] = 1
+		}
+		return k
 	}
-	best, bestRank, bestLabel := -1, 0, false
-	for i, p := range m.Policies {
-		r := rank(p)
-		label := p.Label != "" && labels.HasLabel(ep.Labels, p.Label)
-		if best < 0 || r < bestRank || (r == bestRank && label && !bestLabel) {
-			best, bestRank, bestLabel = i, r, label
+	best := 0
+	for i := 1; i < len(m.Policies); i++ {
+		a, b := key(i), key(best)
+		if a[0] < b[0] || a[0] == b[0] && (a[1] < b[1] || a[1] == b[1] && a[2] < b[2]) {
+			best = i
 		}
 	}
 	for i, p := range m.Policies {

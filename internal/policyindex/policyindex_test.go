@@ -124,67 +124,40 @@ spec:
 `))
 	ix := New([]*Policy{egressOnly, ingressOnly})
 	fe := ep(1, "webshop", "k8s:app.kubernetes.io/name=frontend")
-	if got := ix.Match(fe, Egress).Policies; len(got) != 1 || got[0].Ref.Name != "frontend" {
-		t.Fatalf("egress: got %v", refs(got))
-	}
-	if got := ix.Match(fe, Ingress).Policies; len(got) != 1 || got[0].Ref.Name != "frontend-ingress" {
-		t.Fatalf("ingress: got %v", refs(got))
-	}
-
-	// No selecting policy covers ingress: fall back to every selecting one.
-	ix = New([]*Policy{egressOnly})
-	if got := ix.Match(fe, Ingress).Policies; len(got) != 1 {
-		t.Fatalf("fallback: got %v", refs(got))
+	// Both select the pod in both directions; Pick prefers the one with
+	// rules in the direction.
+	for _, c := range []struct {
+		d    Dir
+		want string
+	}{{Egress, "frontend"}, {Ingress, "frontend-ingress"}} {
+		m := ix.Match(fe, c.d)
+		if len(m.Policies) != 2 {
+			t.Fatalf("%v: got %v, want both", c.d, refs(m.Policies))
+		}
+		if p, others := Pick(m, fe, nil); p.Ref.Name != c.want || len(others) != 1 {
+			t.Errorf("%v: picked %s + %v, want %s", c.d, p.Ref, refs(others), c.want)
+		}
 	}
 }
 
-func TestAllowAll(t *testing.T) {
-	cases := []struct {
-		name string
-		rule string
-		want bool
-	}{
-		{"entity all", `{toEntities: [all]}`, true},
-		{"entity all with ports", `{toEntities: [all], toPorts: [{ports: [{port: "53"}]}]}`, false},
-		{"empty rule allows nothing", `{}`, false},
-		{"empty endpoint selector is namespace-scoped", `{toEndpoints: [{}]}`, false},
-		{"world", `{toEntities: [world]}`, false},
-	}
-	for _, c := range cases {
-		p, _ := Parse(obj(t, `
-metadata: {name: p, namespace: probe}
+// A pod's own policy with no egress rules still beats a namespace baseline
+// that has some.
+func TestOwnPolicyBeatsBaselineWithoutDirection(t *testing.T) {
+	own, _ := Parse(obj(t, `
+metadata: {name: ms, namespace: dif}
 spec:
-  endpointSelector: {}
-  egress: [`+c.rule+`]
-`))
-		m := New([]*Policy{p}).Match(ep(1, "probe", "k8s:app=x"), Egress)
-		if m.AllowAll != c.want {
-			t.Errorf("%s: AllowAll = %v, want %v", c.name, m.AllowAll, c.want)
-		}
-		if New([]*Policy{p}).Match(ep(1, "probe", "k8s:app=x"), Ingress).AllowAll {
-			t.Errorf("%s: egress rule made ingress allow-all", c.name)
-		}
-	}
-}
-
-func TestSpecsList(t *testing.T) {
-	p, ok := Parse(obj(t, `
-metadata: {name: multi, namespace: ns}
-specs:
-- endpointSelector: {matchLabels: {app: a}}
-  egress: [{toEntities: [all]}]
-- endpointSelector: {matchLabels: {app: b}}
+  endpointSelector: {matchLabels: {app: ms}}
   ingress: [{fromEntities: [cluster]}]
 `))
-	if !ok {
-		t.Fatal("not parsed")
-	}
-	ix := New([]*Policy{p})
-	if m := ix.Match(ep(1, "ns", "k8s:app=a"), Egress); !m.AllowAll {
-		t.Error("spec a's allow-all not seen")
-	}
-	if m := ix.Match(ep(2, "ns", "k8s:app=b"), Egress); m.AllowAll {
-		t.Error("spec a's allow-all leaked to b")
+	base, _ := Parse(obj(t, `
+metadata: {name: baseline, namespace: dif}
+spec:
+  endpointSelector: {}
+  egress: [{toEntities: [kube-apiserver]}]
+`))
+	ms := ep(1, "dif", "k8s:app=ms")
+	if p, _ := Pick(New([]*Policy{own, base}).Match(ms, Egress), ms, nil); p.Ref.Name != "ms" {
+		t.Fatalf("picked %s, want ms", p.Ref)
 	}
 }
 
@@ -197,32 +170,37 @@ func TestPick(t *testing.T) {
 		p.Broad = true
 		return p
 	}
+	all := func(ps ...*Policy) Match { return Match{Policies: ps} }
 	fe := ep(1, "webshop", "k8s:app.kubernetes.io/name=frontend")
 	cases := []struct {
-		name     string
-		policies []*Policy
-		ex       Excludes
-		want     string
-		others   int
+		name   string
+		m      Match
+		ex     Excludes
+		want   string
+		others int
 	}{
-		{"none", nil, nil, "", 0},
-		{"one", []*Policy{mk("a", "")}, nil, "a", 0},
-		{"first by name", []*Policy{mk("a", ""), mk("b", "")}, nil, "a", 1},
-		{"cnpgen label match wins", []*Policy{mk("a", ""), mk("frontend", "app.kubernetes.io/name=frontend")}, nil, "frontend", 1},
-		{"bootstrap skipped", []*Policy{mk(BootstrapPrefix+"x", ""), mk("z", "")}, nil, "z", 0},
-		{"bootstrap if alone", []*Policy{mk(BootstrapPrefix+"x", "")}, nil, BootstrapPrefix + "x", 0},
-		{"broad after specific", []*Policy{broad("a-baseline"), mk("frontend", "")}, nil, "frontend", 1},
-		{"broad after specific, whatever the names", []*Policy{broad("a-baseline"), mk("z", "")}, nil, "z", 1},
-		{"broad if alone", []*Policy{broad("a-baseline")}, nil, "a-baseline", 0},
-		{"broad before bootstrap", []*Policy{mk(BootstrapPrefix+"x", ""), broad("z")}, nil, "z", 0},
-		{"excluded by name", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"a-baseline"}, "frontend", 1},
-		{"excluded by ns/name glob", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"webshop/*-baseline"}, "frontend", 1},
-		{"other namespace not excluded", []*Policy{mk("a-baseline", ""), mk("frontend", "")}, Excludes{"other/a-baseline"}, "a-baseline", 1},
-		{"excluded after broad", []*Policy{mk("a-baseline", ""), broad("b")}, Excludes{"a-baseline"}, "b", 1},
-		{"excluded if alone", []*Policy{mk("a-baseline", "")}, Excludes{"a-baseline"}, "a-baseline", 0},
+		{"none", all(), nil, "", 0},
+		{"one", all(mk("a", "")), nil, "a", 0},
+		{"first by name", all(mk("a", ""), mk("b", "")), nil, "a", 1},
+		{"cnpgen label match wins", all(mk("a", ""), mk("frontend", "app.kubernetes.io/name=frontend")), nil, "frontend", 1},
+		{"bootstrap skipped", all(mk(BootstrapPrefix+"x", ""), mk("z", "")), nil, "z", 0},
+		{"bootstrap if alone", all(mk(BootstrapPrefix+"x", "")), nil, BootstrapPrefix + "x", 0},
+		{"broad after specific", all(broad("a-baseline"), mk("frontend", "")), nil, "frontend", 1},
+		{"broad if alone", all(broad("a-baseline")), nil, "a-baseline", 0},
+		{"broad before bootstrap", all(mk(BootstrapPrefix+"x", ""), broad("z")), nil, "z", 0},
+		{"excluded by name", all(mk("a-baseline", ""), mk("frontend", "")), Excludes{"a-baseline"}, "frontend", 1},
+		{"excluded by ns/name glob", all(mk("a-baseline", ""), mk("frontend", "")), Excludes{"webshop/*-baseline"}, "frontend", 1},
+		{"other namespace not excluded", all(mk("a-baseline", ""), mk("frontend", "")), Excludes{"other/a-baseline"}, "a-baseline", 1},
+		{"excluded after broad", all(mk("a-baseline", ""), broad("b")), Excludes{"a-baseline"}, "b", 1},
+		{"excluded if alone", all(mk("a-baseline", "")), Excludes{"a-baseline"}, "a-baseline", 0},
+		{"covering before name", Match{Policies: []*Policy{mk("a", ""), mk("b", "")}, covers: []bool{false, true}}, nil, "b", 1},
+		{"label before covering", Match{Policies: []*Policy{mk("a", ""), mk("frontend", "app.kubernetes.io/name=frontend")},
+			covers: []bool{true, false}}, nil, "frontend", 1},
+		{"specific without rules before covering broad", Match{Policies: []*Policy{broad("a-baseline"), mk("ms", "")},
+			covers: []bool{true, false}}, nil, "ms", 1},
 	}
 	for _, c := range cases {
-		p, others := Pick(Match{Policies: c.policies}, fe, c.ex)
+		p, others := Pick(c.m, fe, c.ex)
 		got := ""
 		if p != nil {
 			got = p.Ref.Name

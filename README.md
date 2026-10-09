@@ -129,7 +129,9 @@ blocked flow is matched to the policy selecting the pod it's enforced at
 and the rules to add go to one file per policy, `missing-rules/<namespace>/<policy>.missing.yaml`
 (`_clusterwide/<policy>.missing.yaml` for clusterwide policies). When several
 policies select the same pods, the rules go to the cnpgen policy generated for
-them if there is one, else the first by name; the file names the others.
+them if there is one, else one already having rules in that direction, else
+the first by name (a policy with only ingress rules still gets the pod's
+missing egress rules over a baseline); the file names the others.
 Policies selecting pods only by namespace (`endpointSelector: {}`, a baseline
 applying to every pod) come last, and so do the ones matched by
 `--exclude-policy` (repeatable: `name`, `namespace/name` or
