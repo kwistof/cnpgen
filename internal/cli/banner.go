@@ -1,7 +1,7 @@
 package cli
 
 // Version is the current cnpgen version.
-const Version = "0.7.3"
+const Version = "0.7.4"
 
 const banner = `
   _________  ____  ____  ___  ____
