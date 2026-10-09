@@ -43,7 +43,7 @@ rbac:
   # every namespace, to say which pod or node holds a blocked peer IP Cilium has
   # no identity for (or that none does: a stale IP). Pod objects include their
   # env values, so turn this off if that access is too broad; cnpgen then logs
-  # those peers by IP only.
+  # those peers by IP only (and `--skip-stale-ips` can't tell stale IPs apart).
   lookupPodIPs: true
 
 serviceAccount:

@@ -80,6 +80,9 @@ type Config struct {
 	// Exclude, with All, are policies missing rules only go to when nothing
 	// else selects the pod (e.g. a hand-written baseline).
 	Exclude policyindex.Excludes
+	// SkipStale logs flows to/from a private IP no running pod or node holds
+	// (a stale peer an app keeps retrying) without adding a rule for them.
+	SkipStale bool
 }
 
 // Run watches until ctx is cancelled (Ctrl+C / SIGTERM). It never writes to
@@ -240,6 +243,9 @@ type ruleSet struct {
 	rules  map[peerKey]map[portKey]struct{}
 	n      int // (peer, port) entries in rules
 	dirty  bool
+	// written is set once the file exists. In --all mode a set is only
+	// written once it has a rule: one created for skipped flows never is.
+	written bool
 }
 
 func newRuleSet(path, name, title, note string) *ruleSet {
@@ -258,6 +264,7 @@ type watcher struct {
 	sets    map[fileKey]*ruleSet
 	count   int // total (peer, port) entries across all sets
 	blocked int
+	skipped int // blocked flows not turned into a rule (SkipStale)
 	capHit  bool
 	reload  chan struct{} // asks Run to re-list policies (non-blocking send)
 }
@@ -290,7 +297,6 @@ func (w *watcher) onFlow(f *hubble.Flow) {
 		return // not a policy we check (e.g. the peer's own egress), allowed by an allow-all rule, or no L4 info
 	}
 	w.blocked++
-	isNew := w.add(rs, pk, port)
 	prefix := ""
 	if w.cfg.All {
 		prefix = "[" + rs.name + "] "
@@ -299,13 +305,25 @@ func (w *watcher) onFlow(f *hubble.Flow) {
 
 	// Outside the lock: it may call the API server, and must not hold up
 	// the other agents' streams meanwhile.
-	note := ""
+	note, stale := "", false
 	if pk.kind == "cidr" && w.ips != nil {
 		if p, err := netip.ParsePrefix(pk.value); err == nil {
-			note = w.ips.describe(p.Addr().String())
+			note, stale = w.ips.lookup(p.Addr().String())
 		}
 	}
-	fmt.Println(logLine(f, pk, port, isNew, prefix, note))
+
+	w.mu.Lock()
+	skip := stale && w.cfg.SkipStale
+	isNew := false
+	if skip {
+		w.skipped++
+		// Added before the IP was known stale (lookup rate-limited)?
+		w.remove(rs, pk, port)
+	} else {
+		isNew = w.add(rs, pk, port)
+	}
+	w.mu.Unlock()
+	fmt.Println(logLine(f, pk, port, isNew, skip, prefix, note))
 }
 
 // flush rewrites the files whose rules changed since their last write.
@@ -313,7 +331,7 @@ func (w *watcher) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, rs := range w.allSets() {
-		if !rs.dirty {
+		if !rs.dirty || rs.n == 0 && !rs.written && w.single == nil {
 			continue
 		}
 		if err := rs.write(); err != nil {
@@ -341,16 +359,28 @@ func (w *watcher) summary() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.cfg.All {
-		fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s), %d missing rule(s) in %s.",
-			w.blocked, w.count, w.cfg.Out)))
+		fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s)%s, %d missing rule(s) in %s.",
+			w.blocked, w.skippedNote(), w.count, w.cfg.Out)))
 		return
 	}
-	sets := w.allSets()
-	fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s), %d missing rule(s) in %d file(s):",
-		w.blocked, w.count, len(sets))))
+	var sets []*ruleSet
+	for _, rs := range w.allSets() {
+		if rs.written || rs.n > 0 {
+			sets = append(sets, rs)
+		}
+	}
+	fmt.Println(ui.Dim(fmt.Sprintf("\nStopped. %d blocked flow(s)%s, %d missing rule(s) in %d file(s):",
+		w.blocked, w.skippedNote(), w.count, len(sets))))
 	for _, rs := range sets {
 		fmt.Printf("  %4d  %s\n", rs.n, rs.path)
 	}
+}
+
+func (w *watcher) skippedNote() string {
+	if w.skipped == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d to/from stale IPs, skipped)", w.skipped)
 }
 
 // add records a (peer, port) entry and reports whether it was new.
@@ -375,6 +405,21 @@ func (w *watcher) add(rs *ruleSet, pk peerKey, port portKey) bool {
 	rs.dirty = true
 	w.count++
 	return true
+}
+
+// remove drops a (peer, port) entry, if present.
+func (w *watcher) remove(rs *ruleSet, pk peerKey, port portKey) {
+	ports := rs.rules[pk]
+	if _, ok := ports[port]; !ok {
+		return
+	}
+	delete(ports, port)
+	if len(ports) == 0 {
+		delete(rs.rules, pk)
+	}
+	rs.n--
+	rs.dirty = true
+	w.count--
 }
 
 // classify maps a blocked flow to the rule set it belongs to and the rule
@@ -563,8 +608,8 @@ func (w *watcher) peer(ep hubble.Endpoint, ip string, port int32, names []string
 }
 
 // logLine renders one blocked flow. note, if set, says who holds a peer IP
-// Cilium has no identity for.
-func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix, note string) string {
+// Cilium has no identity for; skipped says no rule was added for it.
+func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew, skipped bool, prefix, note string) string {
 	ts := time.Now()
 	if t, err := time.Parse(time.RFC3339Nano, f.Time); err == nil {
 		ts = t.Local()
@@ -583,7 +628,10 @@ func logLine(f *hubble.Flow, pk peerKey, port portKey, isNew bool, prefix, note 
 	}
 	line := fmt.Sprintf("%s  BLOCKED %-7s  %s%s -> %s  %d/%s",
 		ts.Format("15:04:05"), pk.dir, prefix, src, dst, port.port, port.proto)
-	if isNew {
+	switch {
+	case skipped:
+		return ui.Dim(line + "  [skipped: stale IP]")
+	case isNew:
 		return ui.Yellow(line + "  [new rule]")
 	}
 	return line
@@ -765,6 +813,7 @@ func (rs *ruleSet) write() error {
 		os.Remove(tmp.Name())
 		return fmt.Errorf("writing %s: %w", rs.path, err)
 	}
+	rs.written = true
 	return nil
 }
 

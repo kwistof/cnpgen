@@ -325,13 +325,14 @@ func cmdVerify(argv []string) int {
 	fs.BoolVar(&g.noBanner, "no-banner", false, "suppress the banner")
 
 	var fqdnCache, out string
-	var all bool
+	var all, skipStale bool
 	var exclude stringList
 	fs.BoolVar(&all, "all", false, "check every policy at once instead of -l pods (-n then only limits which namespace)")
 	fs.Var(&exclude, "exclude-policy", "with --all, never put missing rules in this policy unless no other selects the pod: name, namespace/name or clusterwide/name, globs allowed (repeatable)")
 	fs.StringVar(&out, "o", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
 	fs.StringVar(&out, "out", "missing-rules.yaml", "file to write the missing rules to (with --all: a directory, default missing-rules)")
 	fs.StringVar(&fqdnCache, "fqdn-cache", "", "resolve destinations from this saved *-fqdn dump instead of the live cache")
+	fs.BoolVar(&skipStale, "skip-stale-ips", false, "log flows to/from a private IP no running pod or node holds, but write no rule for them (careful: also skips private IPs outside the cluster with no DNS name)")
 
 	fs.Usage = func() {
 		printGrouped("verify",
@@ -345,7 +346,7 @@ func cmdVerify(argv []string) int {
 			fs, [][2]any{
 				{"Target", []string{"l", "n", "all", "exclude-policy"}},
 				{"Output", []string{"o"}},
-				{"Tuning", []string{"fqdn-cache"}},
+				{"Tuning", []string{"fqdn-cache", "skip-stale-ips"}},
 				{"Cluster", []string{"context", "kubeconfig", "cilium-namespace", "cilium-selector", "nodes"}},
 				{"Misc", []string{"debug", "no-banner"}},
 			})
@@ -395,6 +396,7 @@ func cmdVerify(argv []string) int {
 		Out:       out,
 		FqdnDump:  fqdnCache,
 		Exclude:   policyindex.Excludes(exclude),
+		SkipStale: skipStale,
 	}); err != nil {
 		return fail("%v", err)
 	}

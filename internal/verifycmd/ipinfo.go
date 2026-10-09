@@ -55,6 +55,7 @@ type ipInfo struct {
 
 type ipEntry struct {
 	desc    string
+	stale   bool // no running pod or node holds the IP
 	expires time.Time
 }
 
@@ -63,27 +64,34 @@ func newIPInfo(ctx context.Context, k podLister) *ipInfo {
 		now: time.Now, entries: map[string]ipEntry{}}
 }
 
-// describe returns who holds ip, or "" when ip isn't private, the lookup
-// failed, or the rate limit is reached. Safe for concurrent use; the API call
-// runs without holding the lock.
+// describe returns who holds ip (see lookup).
 func (c *ipInfo) describe(ip string) string {
+	desc, _ := c.lookup(ip)
+	return desc
+}
+
+// lookup returns who holds ip, and stale when no running pod or node does,
+// or "" when ip isn't private, the lookup failed, or the rate limit is
+// reached (stale is then false: unknown). Safe for concurrent use; the API
+// call runs without holding the lock.
+func (c *ipInfo) lookup(ip string) (desc string, stale bool) {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil || !(addr.IsPrivate() || cgnat.Contains(addr.Unmap())) {
-		return ""
+		return "", false
 	}
 	c.mu.Lock()
 	if c.disabled {
 		c.mu.Unlock()
-		return ""
+		return "", false
 	}
 	if e, ok := c.entries[ip]; ok && c.now().Before(e.expires) {
 		c.mu.Unlock()
-		return e.desc
+		return e.desc, e.stale
 	}
 	c.mu.Unlock()
 
 	if !c.limit.Allow() {
-		return ""
+		return "", false
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, ipLookupTimeout)
 	pods, err := c.k.PodsWithIP(ctx, ip)
@@ -99,16 +107,16 @@ func (c *ipInfo) describe(ip string) string {
 		} else if c.ctx.Err() == nil {
 			ui.Log("looking up pods with IP %s: %v", ip, err)
 		}
-		return ""
+		return "", false
 	}
-	desc := describePods(pods)
-	c.store(ip, desc)
-	return desc
+	desc, stale = describePods(pods)
+	c.store(ip, ipEntry{desc: desc, stale: stale})
+	return desc, stale
 }
 
-// store caches desc for ip, dropping expired entries at most once per TTL,
+// store caches e for ip, dropping expired entries at most once per TTL,
 // and not caching at all past ipInfoMax.
-func (c *ipInfo) store(ip, desc string) {
+func (c *ipInfo) store(ip string, e ipEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
@@ -123,13 +131,15 @@ func (c *ipInfo) store(ip, desc string) {
 	if len(c.entries) >= ipInfoMax {
 		return
 	}
-	c.entries[ip] = ipEntry{desc: desc, expires: now.Add(ipInfoTTL)}
+	e.expires = now.Add(ipInfoTTL)
+	c.entries[ip] = e
 }
 
 // describePods sums up who holds an IP: the pod using it, else the node
 // (hostNetwork pods share their node's IP), else a pod that finished (its
-// status keeps the IP after it's released), else no one.
-func describePods(pods []kube.PodRef) string {
+// status keeps the IP after it's released), else no one. stale is true in
+// the last two cases.
+func describePods(pods []kube.PodRef) (desc string, stale bool) {
 	sort.Slice(pods, func(i, j int) bool {
 		if pods[i].Namespace != pods[j].Namespace {
 			return pods[i].Namespace < pods[j].Namespace
@@ -156,13 +166,13 @@ func describePods(pods []kube.PodRef) string {
 		if len(running) > 1 {
 			s += fmt.Sprintf(", +%d more", len(running)-1)
 		}
-		return s
+		return s, false
 	case node != "":
-		return "node " + node
+		return "node " + node, false
 	case len(done) > 0:
-		return "only finished pod " + podDesc(done[0]) + " had it, stale?"
+		return "only finished pod " + podDesc(done[0]) + " had it, stale?", true
 	default:
-		return "no pod has this IP: stale, or outside the cluster?"
+		return "no pod has this IP: stale, or outside the cluster?", true
 	}
 }
 

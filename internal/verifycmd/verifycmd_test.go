@@ -1,14 +1,17 @@
 package verifycmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"golang.org/x/time/rate"
 	"sigs.k8s.io/yaml"
 
 	"github.com/kwistof/cnpgen/internal/hubble"
+	"github.com/kwistof/cnpgen/internal/kube"
 	"github.com/kwistof/cnpgen/internal/model"
 	"github.com/kwistof/cnpgen/internal/policyindex"
 )
@@ -411,6 +414,63 @@ func TestMayBeBlocked(t *testing.T) {
 		// parsed flow, or it would silently drop real misses.
 		if f, err := hubble.ParseLine([]byte(line)); err == nil && f != nil && blocked(f) && !mayBeBlocked([]byte(line)) {
 			t.Errorf("%s: blocked flow rejected by the pre-check", line)
+		}
+	}
+}
+
+func TestSkipStaleIPs(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		w := testWatcher(t, nil)
+		w.cfg.SkipStale = skip
+		k := &fakePods{pods: map[string][]kube.PodRef{
+			"10.1.0.5": {{Namespace: "dif", Name: "db-0"}},
+		}}
+		w.ips = newIPInfo(context.Background(), k)
+
+		w.onFlow(tcpFlow(frontend, world, "EGRESS", "10.1.0.9", 5432)) // nobody holds it
+		w.onFlow(tcpFlow(frontend, world, "EGRESS", "10.1.0.5", 5432)) // a pod Cilium doesn't manage
+		wantCount, wantSkipped := 2, 0
+		if skip {
+			wantCount, wantSkipped = 1, 1
+		}
+		if w.count != wantCount || w.skipped != wantSkipped || w.blocked != 2 {
+			t.Errorf("skip=%v: count=%d skipped=%d blocked=%d, want %d/%d/2", skip, w.count, w.skipped, w.blocked, wantCount, wantSkipped)
+		}
+	}
+}
+
+func TestSkipStaleRemovesRuleAddedBeforeLookup(t *testing.T) {
+	w := testWatcher(t, nil)
+	w.cfg.SkipStale = true
+	w.ips = newIPInfo(context.Background(), &fakePods{})
+	w.ips.limit = rate.NewLimiter(0, 0) // lookups rate-limited: stale unknown
+	w.onFlow(tcpFlow(frontend, world, "EGRESS", "10.1.0.9", 5432))
+	if w.count != 1 {
+		t.Fatalf("count=%d before the IP is known stale, want 1", w.count)
+	}
+	w.ips.limit = rate.NewLimiter(rate.Inf, 1)
+	w.onFlow(tcpFlow(frontend, world, "EGRESS", "10.1.0.9", 5432))
+	if w.count != 0 || len(w.single.rules) != 0 || !w.single.dirty {
+		t.Fatalf("count=%d rules=%d dirty=%v, want the rule dropped", w.count, len(w.single.rules), w.single.dirty)
+	}
+}
+
+func TestAllModeSkippedOnlySetNotWritten(t *testing.T) {
+	// The baseline also selects frontend, so the set gets an "others" entry
+	// (which marks it dirty) without ever getting a rule.
+	w := allWatcher(t, "", parsePolicies(t, frontendPolicy, `
+metadata: {name: baseline, namespace: webshop}
+spec:
+  endpointSelector: {}
+  egress: [{toEntities: [kube-apiserver]}]
+`))
+	w.cfg.SkipStale = true
+	w.ips = newIPInfo(context.Background(), &fakePods{})
+	w.onFlow(tcpFlow(frontend, world, "EGRESS", "10.1.0.9", 5432))
+	w.flush()
+	for _, rs := range w.allSets() {
+		if rs.written {
+			t.Errorf("%s written with no rule", rs.path)
 		}
 	}
 }

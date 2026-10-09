@@ -107,6 +107,14 @@ If no policy selects the pods, nothing is blocked, so nothing is reported.
 Traffic a rule allowing everything (`toEntities: [all]` with no ports) lets
 through isn't reported either.
 
+A private peer IP Cilium has no identity for is looked up among the cluster's
+pods, and the log line says who holds it. With `--skip-stale-ips`, flows to or
+from an IP that no running pod or node holds (`no pod has this IP`, or only a
+finished pod had it) are logged with `[skipped: stale IP]` and no rule is
+written for them: typically an app retrying a peer that's gone. Careful: a
+private IP outside the cluster with no DNS name (e.g. a VM reached through a
+VNet peering) looks the same, so its rule is skipped too. Off by default.
+
 When running several `verify` at once, give each its own `-o` file.
 
 ### Every policy at once: `cnpgen verify --all`

@@ -39,19 +39,20 @@ func testIPInfo(k podLister) (*ipInfo, *time.Time) {
 func TestDescribePods(t *testing.T) {
 	back := kube.PodRef{Namespace: "webshop", Name: "hybris-back-1", Labels: map[string]string{"app.kubernetes.io/name": "hybris-back"}}
 	cases := []struct {
-		name string
-		pods []kube.PodRef
-		want string
+		name  string
+		pods  []kube.PodRef
+		want  string
+		stale bool
 	}{
-		{"pod", []kube.PodRef{back}, "pod webshop/hybris-back-1, app.kubernetes.io/name=hybris-back, unknown to Cilium"},
-		{"node", []kube.PodRef{{Namespace: "kube-system", Name: "kube-proxy-x", Node: "aks-1", HostNetwork: true}}, "node aks-1"},
-		{"running pod beats a finished one", []kube.PodRef{{Namespace: "a", Name: "job-1", Done: true}, back}, "pod webshop/hybris-back-1"},
-		{"finished pod only", []kube.PodRef{{Namespace: "a", Name: "job-1", Done: true}}, "only finished pod a/job-1 had it, stale?"},
-		{"nobody", nil, "no pod has this IP"},
+		{"pod", []kube.PodRef{back}, "pod webshop/hybris-back-1, app.kubernetes.io/name=hybris-back, unknown to Cilium", false},
+		{"node", []kube.PodRef{{Namespace: "kube-system", Name: "kube-proxy-x", Node: "aks-1", HostNetwork: true}}, "node aks-1", false},
+		{"running pod beats a finished one", []kube.PodRef{{Namespace: "a", Name: "job-1", Done: true}, back}, "pod webshop/hybris-back-1", false},
+		{"finished pod only", []kube.PodRef{{Namespace: "a", Name: "job-1", Done: true}}, "only finished pod a/job-1 had it, stale?", true},
+		{"nobody", nil, "no pod has this IP", true},
 	}
 	for _, c := range cases {
-		if got := describePods(c.pods); !strings.HasPrefix(got, c.want) {
-			t.Errorf("%s: got %q, want prefix %q", c.name, got, c.want)
+		if got, stale := describePods(c.pods); !strings.HasPrefix(got, c.want) || stale != c.stale {
+			t.Errorf("%s: got %q stale=%v, want prefix %q stale=%v", c.name, got, stale, c.want, c.stale)
 		}
 	}
 }
@@ -129,7 +130,7 @@ func TestIPInfoStopsWhenForbidden(t *testing.T) {
 func TestLogLineNotesWorldPeer(t *testing.T) {
 	f := tcpFlow(frontend, world, "EGRESS", "172.16.80.183", 7801)
 	pk := peerKey{dir: "egress", kind: "cidr", value: "172.16.80.183/32"}
-	got := logLine(f, pk, portKey{7801, "TCP"}, false, "", "node aks-1")
+	got := logLine(f, pk, portKey{7801, "TCP"}, false, false, "", "node aks-1")
 	if !strings.Contains(got, "-> 172.16.80.183 (node aks-1)  7801/TCP") {
 		t.Fatalf("got %q", got)
 	}
